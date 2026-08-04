@@ -61,36 +61,58 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     super.dispose();
   }
 
-  void _handleLogin() {
-    // --- CONNEXION SPÉCIALE DIRECTEUR PNR ---
-    if (_idController.text == 'DEXpnr' && _pwController.text == '1234') {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const DirectorDashboardView(targetCity: 'PNR')),
-      );
-      return;
-    }
+  bool _isLoggingIn = false;
 
-    // --- CONNEXION SPÉCIALE DIRECTEUR BZV ---
-    if (_idController.text == 'DEXbzv' && _pwController.text == '1234') {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const DirectorDashboardView(targetCity: 'BZV')),
-      );
-      return;
-    }
+  Future<void> _handleLogin() async {
+    if (_isLoggingIn) return;
+    setState(() {
+      _isLoggingIn = true;
+      _error = "";
+    });
 
-    // --- CONNEXION STANDARD ---
-    if (AuthManager.login(_idController.text, _pwController.text)) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const MainDashboard()),
-      );
-    } else {
-      SystemSound.play(SystemSoundType.alert);
-      _shakeController.forward(from: 0);
-      setState(() => _error = "Identifiant ou mot de passe incorrect");
+    final result = await AuthManager.login(_idController.text.trim(), _pwController.text);
+    if (!mounted) return;
+
+    switch (result) {
+      case AuthResult.succes:
+        // Les comptes de rôle 'dex' vont vers le tableau de bord Direction,
+        // tous les autres (admin/rep/sup) vers le dashboard standard.
+        if (AuthManager.currentUserRole == 'dex') {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (context) => DirectorDashboardView(targetCity: AuthManager.currentUserCity),
+            ),
+          );
+        } else {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (context) => const MainDashboard()),
+          );
+        }
+        return; // pas de setState après navigation
+      case AuthResult.bloque:
+        _echouerConnexion("Ce compte est bloqué. Contactez un administrateur.");
+        break;
+      case AuthResult.desactive:
+        _echouerConnexion("Ce compte est désactivé.");
+        break;
+      case AuthResult.erreurReseau:
+        _echouerConnexion("Connexion impossible. Vérifiez votre connexion Internet.");
+        break;
+      case AuthResult.echec:
+        _echouerConnexion("Identifiant ou mot de passe incorrect");
+        break;
     }
+  }
+
+  void _echouerConnexion(String message) {
+    SystemSound.play(SystemSoundType.alert);
+    _shakeController.forward(from: 0);
+    setState(() {
+      _isLoggingIn = false;
+      _error = message;
+    });
   }
 
   @override
@@ -164,7 +186,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                     ),
                     const SizedBox(width: 14),
                     const Text(
-                      "DASHDARK",
+                      "CR EVALUATION",
                       style: TextStyle(
                         color: Colors.white,
                         fontSize: 15,
@@ -274,7 +296,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                     child: const Icon(Icons.flight_takeoff, color: Colors.white, size: 17),
                   ),
                   const SizedBox(width: 10),
-                  const Text("DASHDARK", style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w800, letterSpacing: 3)),
+                  const Text("CR EVALUATION", style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w800, letterSpacing: 3)),
                 ],
               ),
               const SizedBox(height: 28),
@@ -418,12 +440,18 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           ),
           child: InkWell(
             borderRadius: BorderRadius.circular(13),
-            onTap: _handleLogin,
-            child: const Center(
-              child: Text(
-                "SE CONNECTER",
-                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 13, letterSpacing: 1.2),
-              ),
+            onTap: _isLoggingIn ? null : _handleLogin,
+            child: Center(
+              child: _isLoggingIn
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    )
+                  : const Text(
+                      "SE CONNECTER",
+                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 13, letterSpacing: 1.2),
+                    ),
             ),
           ),
         ),

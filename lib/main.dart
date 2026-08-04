@@ -4,7 +4,10 @@ import 'auth_manager.dart';
 import 'employee_repository.dart';
 import 'evaluation_view.dart';
 import 'scores_view.dart';
-//import 'director_view.dart'; // <--- AJOUTER CECI
+import 'director_view.dart'; // DirectorDashboardView
+import 'journal_view.dart'; // ← Journal d'activité (admin)
+import 'comptes_view.dart'; // ← Gestion des comptes (admin)
+import 'change_password_dialog.dart'; // ← Changer son propre mot de passe
 import 'evaluation_unlock_view.dart'; // ← AJOUTER : déblocage évaluations (Rep/Admin)
 import 'package:supabase_flutter/supabase_flutter.dart'; // N'oubliez pas cet import
 import 'login_screen.dart';
@@ -68,6 +71,21 @@ class _MainDashboardState extends State<MainDashboard> {
     setState(() => _isLoadingEmployees = false);
   }
 
+  /// Ouvre le tableau de bord Direction d'une ville, en mode "admin" :
+  /// poussé par-dessus MainDashboard (pas de pushReplacement), avec un
+  /// bouton retour qui ramène ici sans déconnecter le compte admin.
+  void _openDirectorView(String city) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => DirectorDashboardView(
+          targetCity: city,
+          onBackToAdmin: () => Navigator.of(context).pop(),
+        ),
+      ),
+    );
+  }
+
   Widget _getSelectedWidget() {
     //print(">>> _selectedPage = '$_selectedPage'"); // temporaire
     if (_isLoadingEmployees) {
@@ -77,6 +95,14 @@ class _MainDashboardState extends State<MainDashboard> {
     
 
     if (_selectedPage == 'Home') {return _buildHomePage();}
+
+    if (_selectedPage == "Journal d'activité") {
+      return const JournalActiviteView();
+    }
+
+    if (_selectedPage == "Gestion des comptes") {
+      return const ComptesView();
+    }
 
     final List<String> parts = _selectedPage.split(' : ');
     String category = parts.first;
@@ -104,6 +130,8 @@ class _MainDashboardState extends State<MainDashboard> {
       return ScoreView(
         employees: displayedEmployees,
         allCityEmployees: allCityEmployees,
+        ville: ville,
+        service: service,
       );
     }
 
@@ -119,18 +147,18 @@ class _MainDashboardState extends State<MainDashboard> {
 
 
     if (category == "Évaluation du personnel") {
-      return EvaluationPersonnelView(
+      return EvaluationView(
         employees: EmployeeRepository.instance.employees,
         targetVille: ville,
         targetService: service,
         onUpdate: () async {
-      
-      // 2. Recharger les données proprement
-                 await EmployeeRepository.instance.init();
-           if (mounted) {
-          setState(() {});
-          }
-        },
+
+          // 2. Recharger les données proprement
+                     await EmployeeRepository.instance.init();
+               if (mounted) {
+              setState(() {});
+              }
+            },
       );
     }
 
@@ -185,6 +213,28 @@ class _MainDashboardState extends State<MainDashboard> {
                         const Divider(color: Colors.white10),
                         _buildGoldSectionTitle('SUPERVISEUR'),
                         _buildCityTree("Évaluation du personnel"),
+                      ],
+                      // --- Accès Direction + Journal, réservé à admin ---
+                      // Les comptes DEX (director_view.dart) y accèdent par
+                      // leur propre écran de connexion dédié ; admin y
+                      // accède ici, en plus, sans perdre son accès
+                      // rep/sup ci-dessus (pas de pushReplacement : retour
+                      // possible vers ce dashboard via le bouton retour).
+                      if (AuthManager.currentUserRole == "admin") ...[
+                        const Divider(color: Colors.white10),
+                        _buildGoldSectionTitle('DIRECTION & ADMIN'),
+                        _buildNavItemAction(
+                          Icons.diamond_outlined,
+                          "Direction PNR",
+                          () => _openDirectorView('PNR'),
+                        ),
+                        _buildNavItemAction(
+                          Icons.diamond_outlined,
+                          "Direction BZV",
+                          () => _openDirectorView('BZV'),
+                        ),
+                        _buildNavItem(Icons.receipt_long_outlined, "Journal d'activité"),
+                        _buildNavItem(Icons.admin_panel_settings_outlined, "Gestion des comptes"),
                       ],
                      ],
               ),
@@ -276,7 +326,7 @@ class _MainDashboardState extends State<MainDashboard> {
       break;
     default:
       imagePath = '';
-      titre = 'DashDark';
+      titre = 'CR EVALUATION';
       description = 'Tableau de bord de gestion du personnel';
   }
  
@@ -359,11 +409,12 @@ Widget _buildFallbackHome(String titre, String description) {
         Icon(Icons.dashboard, size: 28, color: Colors.purpleAccent),
         SizedBox(width: 10),
         Text(
-          "DashDark",
+          "CR EVALUATION",
           style: TextStyle(
-            fontSize: 18,
+            fontSize: 15,
             fontWeight: FontWeight.bold,
             color: Colors.white,
+            letterSpacing: 0.5,
           ),
         ),
       ],
@@ -394,6 +445,16 @@ Widget _buildFallbackHome(String titre, String description) {
         }
       });
     },
+  );
+
+  /// Item de nav qui déclenche une ACTION (ex: ouvrir un écran par-dessus,
+  /// via Navigator.push) au lieu de changer _selectedPage. Utilisé pour les
+  /// raccourcis "Direction PNR/BZV" de l'admin.
+  Widget _buildNavItemAction(IconData icon, String title, VoidCallback onTap) => ListTile(
+    leading: Icon(icon, color: Colors.amber, size: 20),
+    title: Text(title, style: const TextStyle(color: Colors.white70, fontSize: 13)),
+    trailing: const Icon(Icons.open_in_new, size: 13, color: Colors.white24),
+    onTap: onTap,
   );
 
   Widget _buildGoldSectionTitle(String text) => Padding(
@@ -1356,15 +1417,26 @@ Row(
       AuthManager.currentUserID ?? "User",
       style: const TextStyle(fontSize: 12),
     ),
-    trailing: IconButton(
-      icon: const Icon(Icons.logout, size: 18, color: Colors.redAccent),
-      onPressed: () {
-        AuthManager.logout();
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (context) => const LoginScreen()),
-        );
-      },
+    trailing: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          icon: const Icon(Icons.key_outlined, size: 17, color: Colors.white38),
+          tooltip: "Changer mon mot de passe",
+          onPressed: () => showChangePasswordDialog(context),
+        ),
+        IconButton(
+          icon: const Icon(Icons.logout, size: 18, color: Colors.redAccent),
+          tooltip: "Déconnexion",
+          onPressed: () {
+            AuthManager.logout();
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(builder: (context) => const LoginScreen()),
+            );
+          },
+        ),
+      ],
     ),
   );
 

@@ -1,4 +1,5 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'auth_manager.dart';
 // AJOUTER tout en haut, avant la classe EmployeeRepository
 class SupabaseUnavailableException implements Exception {
   final String message;
@@ -47,6 +48,123 @@ class EmployeeRepository {
     }
   }
 
+  // ============================================================
+  //   JOURNAL D'ACTIVITÉ (audit) — qui a fait quoi, quand
+  // ============================================================
+  //
+  // Centralisé ici plutôt que dans chaque écran : toutes les mutations
+  // (agents, évaluations, déblocages, quota) passent déjà par cette classe,
+  // donc c'est le point unique le plus fiable pour tout tracer, sans
+  // dépendre de ce que fait chaque widget d'appel.
+  //
+  // Table Supabase attendue (à créer) :
+  //   create table journal_activite (
+  //     id uuid primary key default gen_random_uuid(),
+  //     cree_le timestamptz not null default now(),
+  //     compte text,
+  //     role text,
+  //     action text not null,        -- creation | modification | suppression | deblocage | blocage
+  //     cible_type text not null,    -- agent | evaluation | deblocage | quota | session
+  //     cible_id text,
+  //     cible_libelle text,
+  //     ville text,
+  //     service text,
+  //     details jsonb
+  //   );
+
+  /// Enregistre un évènement dans le journal d'activité. Best-effort : un
+  /// échec de journalisation ne doit JAMAIS faire échouer l'action métier
+  /// réelle (l'agent/évaluation est déjà modifié quand on journalise).
+  Future<void> _journaliser({
+    required String action,
+    required String cibleType,
+    String? cibleId,
+    String? cibleLibelle,
+    String? ville,
+    String? service,
+    Map<String, dynamic>? details,
+  }) async {
+    try {
+      await _supabase.from('journal_activite').insert({
+        'compte': AuthManager.currentUserID ?? 'inconnu',
+        'role': AuthManager.currentUserRole,
+        'action': action,
+        'cible_type': cibleType,
+        'cible_id': cibleId,
+        'cible_libelle': cibleLibelle,
+        'ville': ville,
+        'service': service,
+        'details': details ?? {},
+      });
+    } catch (_) {
+      // Silencieux et volontaire : la journalisation ne doit jamais
+      // remonter d'erreur à l'utilisateur ni annuler son action.
+    }
+  }
+
+  /// Wrapper public de _journaliser, pour que d'autres classes (ex:
+  /// AuthManager, pour les évènements liés aux comptes : connexion,
+  /// création/modification de compte, changement de mot de passe...)
+  /// puissent journaliser sans dupliquer la logique d'accès à Supabase.
+  Future<void> journaliserActivite({
+    required String action,
+    required String cibleType,
+    String? cibleId,
+    String? cibleLibelle,
+    String? ville,
+    String? service,
+    Map<String, dynamic>? details,
+  }) {
+    return _journaliser(
+      action: action,
+      cibleType: cibleType,
+      cibleId: cibleId,
+      cibleLibelle: cibleLibelle,
+      ville: ville,
+      service: service,
+      details: details,
+    );
+  }
+
+  /// Recherche paginée dans le journal d'activité, filtres tous optionnels
+  /// et combinables. Tri du plus récent au plus ancien.
+  Future<List<Map<String, dynamic>>> rechercherJournal({
+    String? compte,
+    String? action,
+    String? cibleType,
+    String? ville,
+    DateTime? dateDebut,
+    DateTime? dateFin,
+    int limit = 300,
+  }) async {
+    try {
+      dynamic query = _supabase.from('journal_activite').select();
+      if (compte != null && compte.isNotEmpty) {
+        query = query.ilike('compte', '%$compte%');
+      }
+      if (action != null && action.isNotEmpty) {
+        query = query.eq('action', action);
+      }
+      if (cibleType != null && cibleType.isNotEmpty) {
+        query = query.eq('cible_type', cibleType);
+      }
+      if (ville != null && ville.isNotEmpty) {
+        query = query.eq('ville', ville);
+      }
+      if (dateDebut != null) {
+        query = query.gte('cree_le', dateDebut.toIso8601String());
+      }
+      if (dateFin != null) {
+        query = query.lte('cree_le', dateFin.toIso8601String());
+      }
+      final List<dynamic> response =
+          await query.order('cree_le', ascending: false).limit(limit);
+      return List<Map<String, dynamic>>.from(response);
+    } catch (e) {
+      throw Exception("Erreur de chargement du journal : $e");
+    }
+  }
+
 
 
 
@@ -83,6 +201,14 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
       'genre': employee['genre'],
     });
     await init();
+    _journaliser(
+      action: 'creation',
+      cibleType: 'agent',
+      cibleLibelle: "${employee['nom']} ${employee['prenom']}",
+      ville: employee['ville']?.toString(),
+      service: employee['service']?.toString(),
+      details: {'fonction': employee['fonction']},
+    );
   } catch (e) {
     
     throw SupabaseUnavailableException(
@@ -100,6 +226,9 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
   String? evaluateur,
   String? vacation,          // ← AJOUTER : vacation de la session
   DateTime? dateEvaluation,  // ← AJOUTER : date visée (peut être antidatée)
+  String? gdv,               // ← GDV de la vacation
+  String? poste,             // ← Front Office / Back Office
+  String? numeroVol,         // ← Numéro de vol
 }) async {
   try {
     await _supabase.from('evaluations').insert({
@@ -112,7 +241,16 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
       'date_evaluation': (dateEvaluation ?? DateTime.now())
           .toIso8601String()
           .substring(0, 10),
+      'gdv': gdv ?? '',
+      'poste': poste ?? '',
+      'numero_vol': numeroVol ?? '',
     });
+    _journaliser(
+      action: 'creation',
+      cibleType: 'evaluation',
+      cibleLibelle: _libelleAgent(agentId),
+      details: {'score': scoreTotal, 'evaluateur': evaluateur, 'vacation': vacation},
+    );
   } catch (e) {
     throw Exception("Erreur d'enregistrement de l'évaluation : $e");
   }
@@ -169,8 +307,33 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
         'score': scoreTotal,
         'items_evalues': items,
       }).eq('id', evaluationId);
+      _journaliser(
+        action: 'modification',
+        cibleType: 'evaluation',
+        cibleId: evaluationId,
+        details: {'nouveau_score': scoreTotal},
+      );
     } catch (e) {
       throw Exception("Erreur de modification de l'évaluation : $e");
+    }
+  }
+
+  /// Supprime définitivement une évaluation déjà enregistrée.
+  /// Le contrôle des 48h / du déblocage doit être fait par l'appelant
+  /// AVANT d'appeler cette méthode (voir estDebloque), exactement comme
+  /// pour modifierEvaluation.
+  Future<void> supprimerEvaluation({
+    required String evaluationId,
+  }) async {
+    try {
+      await _supabase.from('evaluations').delete().eq('id', evaluationId);
+      _journaliser(
+        action: 'suppression',
+        cibleType: 'evaluation',
+        cibleId: evaluationId,
+      );
+    } catch (e) {
+      throw Exception("Erreur de suppression de l'évaluation : $e");
     }
   }
 
@@ -196,6 +359,17 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
         'debloque_par': debloquePar,
         'expire_le': DateTime.now().add(validite).toIso8601String(),
       });
+      _journaliser(
+        action: 'deblocage',
+        cibleType: 'deblocage',
+        ville: ville,
+        service: service,
+        details: {
+          'date_cible': dateCible.toIso8601String().substring(0, 10),
+          'vacation': vacation,
+          'debloque_par': debloquePar,
+        },
+      );
     } catch (e) {
       throw Exception("Erreur lors du déblocage : $e");
     }
@@ -228,6 +402,7 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
   Future<void> annulerDeblocage(String id) async {
     try {
       await _supabase.from('deblocages_evaluation').delete().eq('id', id);
+      _journaliser(action: 'blocage', cibleType: 'deblocage', cibleId: id);
     } catch (e) {
       throw Exception("Erreur lors du blocage : $e");
     }
@@ -313,6 +488,11 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
     if (evaluationIds.isEmpty) return;
     try {
       await _supabase.from('evaluations').delete().inFilter('id', evaluationIds);
+      _journaliser(
+        action: 'suppression',
+        cibleType: 'session',
+        details: {'nombre_evaluations': evaluationIds.length},
+      );
     } catch (e) {
       throw Exception("Erreur de suppression de la session : $e");
     }
@@ -354,6 +534,11 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
         'modifie_par': modifiePar,
         'modifie_le': DateTime.now().toIso8601String(),
       });
+      _journaliser(
+        action: 'modification',
+        cibleType: 'quota',
+        details: {'nouvelle_valeur': valeur, 'modifie_par': modifiePar},
+      );
     } catch (e) {
       throw Exception("Erreur lors de la mise à jour du quota : $e");
     }
@@ -363,6 +548,7 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
   Future<void> supprimerQuota() async {
     try {
       await _supabase.from('parametres_systeme').delete().eq('cle', _cleQuota);
+      _journaliser(action: 'suppression', cibleType: 'quota');
     } catch (e) {
       throw Exception("Erreur lors de la suppression du quota : $e");
     }
@@ -418,6 +604,19 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
   /// - Quota mensuel : si l'agent a déjà atteint le nombre de jours
   ///   d'évaluation autorisés ce mois-ci ET que cette date est un nouveau
   ///   jour pour lui, l'évaluation est ignorée (non enregistrée).
+  ///
+  /// gdv / poste / numeroVol : infos de contexte de la vacation (renseignées
+  /// une fois par session côté UI), persistées sur chaque évaluation pour
+  /// être consultables par les reps dans le popup "Détails de l'évaluation".
+  /// Libellé lisible d'un agent pour le journal (nom + prénom), retombe sur
+  /// l'id brut si l'agent n'est pas (encore) dans le cache local.
+  String _libelleAgent(String agentId) {
+    final match = employees.where((e) => e['id'].toString() == agentId);
+    if (match.isEmpty) return agentId;
+    final a = match.first;
+    return "${a['nom'] ?? ''} ${a['prenom'] ?? ''}".trim();
+  }
+
   Future<ResultatEnregistrementEvaluation> enregistrerEvaluationControlee({
     required String agentId,
     required double scoreTotal,
@@ -426,6 +625,9 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
     String? evaluateur,
     String? vacation,
     required DateTime dateEvaluation,
+    String? gdv,
+    String? poste,
+    String? numeroVol,
   }) async {
     final iso = dateEvaluation.toIso8601String().substring(0, 10);
 
@@ -457,7 +659,22 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
             'evaluateur': evaluateur ?? '',
             'vacation': vacation ?? '',
             'date_evaluation': iso,
+            'gdv': gdv ?? '',
+            'poste': poste ?? '',
+            'numero_vol': numeroVol ?? '',
           });
+          _journaliser(
+            action: 'creation',
+            cibleType: 'evaluation',
+            cibleLibelle: _libelleAgent(agentId),
+            details: {
+              'score': scoreTotal,
+              'evaluateur': evaluateur,
+              'vacation': vacation,
+              'recalage': true,
+              'commentaire': commentaire,
+            },
+          );
           return ResultatEnregistrementEvaluation.recalageNouvelleNoteConservee;
         }
         // La note existante était déjà meilleure ou égale : on ne fait rien.
@@ -470,6 +687,12 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
         final joursEvalues =
             await compterJoursEvaluesDuMois(agentId, dateEvaluation);
         if (joursEvalues >= maxJours) {
+          _journaliser(
+            action: 'quota_atteint',
+            cibleType: 'evaluation',
+            cibleLibelle: _libelleAgent(agentId),
+            details: {'quota': maxJours, 'evaluateur': evaluateur},
+          );
           return ResultatEnregistrementEvaluation.quotaAtteintIgnore;
         }
       }
@@ -483,7 +706,20 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
         'evaluateur': evaluateur ?? '',
         'vacation': vacation ?? '',
         'date_evaluation': iso,
+        'gdv': gdv ?? '',
+        'poste': poste ?? '',
+        'numero_vol': numeroVol ?? '',
       });
+      _journaliser(
+        action: 'creation',
+        cibleType: 'evaluation',
+        cibleLibelle: _libelleAgent(agentId),
+        details: {
+          'score': scoreTotal,
+          'evaluateur': evaluateur,
+          'vacation': vacation,
+        },
+      );
       return ResultatEnregistrementEvaluation.insere;
     } catch (e) {
       throw Exception("Erreur d'enregistrement contrôlé de l'évaluation : $e");
@@ -533,6 +769,14 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
       'date_embauche': employee['dateEmbauche'],
     }).eq('id', employee['id']);
     await init();
+    _journaliser(
+      action: 'modification',
+      cibleType: 'agent',
+      cibleId: employee['id']?.toString(),
+      cibleLibelle: "${employee['nom']} ${employee['prenom']}",
+      ville: employee['ville']?.toString(),
+      service: employee['service']?.toString(),
+    );
   } catch (e) {
     
     throw SupabaseUnavailableException(
@@ -543,8 +787,20 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
   /// Supprime un agent (la suppression en cascade doit être activée sur Supabase pour les évaluations)
  Future<void> removeEmployee(String id) async {
   try {
+    final match = employees.where((e) => e['id'] == id);
+    final agentAvant = match.isNotEmpty ? match.first : null;
     await _supabase.from('agents').delete().eq('id', id);
     employees.removeWhere((e) => e['id'] == id);
+    _journaliser(
+      action: 'suppression',
+      cibleType: 'agent',
+      cibleId: id,
+      cibleLibelle: agentAvant != null
+          ? "${agentAvant['nom']} ${agentAvant['prenom']}"
+          : id,
+      ville: agentAvant?['ville']?.toString(),
+      service: agentAvant?['service']?.toString(),
+    );
   } catch (e) {
     
     throw SupabaseUnavailableException(
@@ -596,6 +852,13 @@ Future<void> addEmployee(Map<String, dynamic> employee) async {
           .eq('ville', ville)
           .eq('service', service);
     }
+    _journaliser(
+      action: 'suppression',
+      cibleType: 'reset_service',
+      ville: ville,
+      cibleLibelle: services.join(', '),
+      details: {'services': services, 'nombre_agents': ids.length},
+    );
     
 
     await init();

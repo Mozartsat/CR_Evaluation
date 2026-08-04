@@ -1,50 +1,93 @@
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'employee_repository.dart';
+
+/// Résultat d'une tentative de connexion — permet à l'écran de login
+/// d'afficher un message précis (identifiant/mdp faux, compte bloqué,
+/// compte désactivé, ou souci réseau), au lieu d'un message générique.
+enum AuthResult { succes, echec, bloque, desactive, erreurReseau }
+
 class AuthManager {
+  static final SupabaseClient _supabase = Supabase.instance.client;
+
   static String? currentUserID;
   static String currentUserCity = 'PNR';
   static Set<String> currentUserServices = {};
+  // 'admin' | 'dex' | 'rep' | 'sup'
   static String currentUserRole = 'rep';
+  // id (uuid) du compte en base, nécessaire pour changer son propre mot de
+  // passe sans avoir à re-rechercher l'identifiant.
+  static String? _currentAccountId;
+
   static bool get isRep => currentUserRole == 'rep';
 
   // Rep et Admin peuvent débloquer une évaluation verrouillée (>48h).
-  // DEX passe par un autre écran (director_view.dart) qui n'utilise pas
-  // AuthManager, mais utilise directement le même mécanisme de déblocage
-  // côté EmployeeRepository.
   static bool get canUnlockEvaluations =>
       currentUserRole == 'rep' || currentUserRole == 'admin';
 
+  // ============================================================
+  //   CONNEXION / DÉCONNEXION
+  // ============================================================
 
-  static final Map<String, Map<String, dynamic>> _users = {
-    'admin': {'password': '1234', 'city': 'ALL', 'services': ['Passage', 'Ops', 'Piste', 'Fret', 'Garage'], 'role': 'admin'},
-    'repkppnr': {'password': '1234', 'city': 'PNR', 'services': ['Passage'], 'role': 'rep'},
-    'repopspnr': {'password': '1234', 'city': 'PNR', 'services': ['Ops', 'Piste'], 'role': 'rep'},
-    'repfretpnr': {'password': '1234', 'city': 'PNR', 'services': ['Fret'], 'role': 'rep'},
-    'repgrgpnr': {'password': '1234', 'city': 'PNR', 'services': ['Garage'], 'role': 'rep'},
-    'repkpbzv': {'password': '1234', 'city': 'BZV', 'services': ['Passage'], 'role': 'rep'},
-    'repopsbzv': {'password': '1234', 'city': 'BZV', 'services': ['Ops', 'Piste'], 'role': 'rep'},
-    'repfretbzv': {'password': '1234', 'city': 'BZV', 'services': ['Fret'], 'role': 'rep'},
-    'repgrgbzv': {'password': '1234', 'city': 'BZV', 'services': ['Garage'], 'role': 'rep'},
-    'supkppnr': {'password': '1234', 'city': 'PNR', 'services': ['Passage'], 'role': 'sup'},
-    'supkpbzv': {'password': '1234', 'city': 'BZV', 'services': ['Passage'], 'role': 'sup'},
-    'supopspnr': {'password': '1234', 'city': 'PNR', 'services': ['Ops'], 'role': 'sup'},
-    'supopsbzv': {'password': '1234', 'city': 'BZV', 'services': ['Ops'], 'role': 'sup'},
-    'supfretpnr': {'password': '1234', 'city': 'PNR', 'services': ['Fret'], 'role': 'sup'},
-    'supfretbzv': {'password': '1234', 'city': 'BZV', 'services': ['Fret'], 'role': 'sup'},
-    'supgrgpnr': {'password': '1234', 'city': 'PNR', 'services': ['Garage'], 'role': 'sup'},
-    'supgrgbzv': {'password': '1234', 'city': 'BZV', 'services': ['Garage'], 'role': 'sup'},
-    'suppistepnr': {'password': '1234', 'city': 'PNR', 'services': ['Piste'], 'role': 'sup'},
-    'suppistebzv': {'password': '1234', 'city': 'BZV', 'services': ['Piste'], 'role': 'sup'},
-  };
+  /// Vérifie l'identifiant/mot de passe dans la table Supabase `comptes`.
+  /// Un compte bloqué ou désactivé est refusé même si le mot de passe est
+  /// correct, avec un résultat distinct pour que l'écran de login puisse
+  /// afficher le bon message.
+  static Future<AuthResult> login(String id, String pw) async {
+    try {
+      final row = await _supabase
+          .from('comptes')
+          .select()
+          .eq('identifiant', id)
+          .maybeSingle();
 
-  static bool login(String id, String pw) {
-    final user = _users[id];
-    if (user != null && user['password'] == pw) {
-      currentUserID = id;
-      currentUserCity = user['city'] as String;
-      currentUserServices = Set<String>.from(user['services'] as List<dynamic>);
-      currentUserRole = user['role'] as String;
-      return true;
+      if (row == null || row['mot_de_passe'] != pw) {
+        return AuthResult.echec;
+      }
+      if (row['bloque'] == true) return AuthResult.bloque;
+      if (row['actif'] == false) return AuthResult.desactive;
+
+      currentUserID = row['identifiant'] as String;
+      currentUserCity = row['ville'] as String;
+      currentUserServices =
+          Set<String>.from((row['services'] as List?) ?? const []);
+      currentUserRole = row['role'] as String;
+      _currentAccountId = row['id'] as String;
+
+      // Mise à jour du dernier login — best-effort, ne bloque pas la
+      // connexion si ça échoue (et n'échoue jamais bruyamment).
+      unawaited(_supabase
+          .from('comptes')
+          .update({'dernier_login': DateTime.now().toIso8601String()})
+          .eq('id', row['id'])
+          .then((_) {}, onError: (_) {}));
+
+      unawaited(EmployeeRepository.instance.journaliserActivite(
+        action: 'connexion',
+        cibleType: 'compte',
+        cibleId: _currentAccountId,
+        cibleLibelle: currentUserID,
+      ));
+
+      return AuthResult.succes;
+    } catch (_) {
+      return AuthResult.erreurReseau;
     }
-    return false;
+  }
+
+  static void logout() {
+    if (currentUserID != null) {
+      unawaited(EmployeeRepository.instance.journaliserActivite(
+        action: 'deconnexion',
+        cibleType: 'compte',
+        cibleId: _currentAccountId,
+        cibleLibelle: currentUserID,
+      ));
+    }
+    currentUserID = null;
+    currentUserCity = 'PNR';
+    currentUserServices = {};
+    currentUserRole = 'rep';
+    _currentAccountId = null;
   }
 
   static bool canSeeCity(String city) {
@@ -55,7 +98,7 @@ class AuthManager {
 
   static bool hasAccess(String label) {
     if (currentUserID == null) return false;
-    if (currentUserID == 'admin') return true;
+    if (currentUserRole == 'admin') return true;
 
     final parts = label.split(' : ');
     if (parts.length < 2) return false;
@@ -66,22 +109,211 @@ class AuthManager {
     return currentUserCity == city && currentUserServices.contains(service);
   }
 
-  static void logout() {
-    currentUserID = null;
-    currentUserCity = 'PNR';
-    currentUserServices = {};
-    currentUserRole = 'rep';
+  // Retourne la juridiction du rep connecté (services + ville)
+  static Map<String, dynamic>? get juridiction {
+    if (!isRep) return null;
+    return {
+      'services': currentUserServices.toList(),
+      'ville': currentUserCity,
+    };
   }
 
-  // Retourne la juridiction du rep connecté (services + ville)
-static Map<String, dynamic>? get juridiction {
-  if (!isRep) return null;
-  return {
-    'services': currentUserServices.toList(),
-    'ville': currentUserCity,
-  };
+  // ============================================================
+  //   MOT DE PASSE
+  // ============================================================
+
+  /// Le compte connecté change SON PROPRE mot de passe — l'ancien mot de
+  /// passe doit être fourni et vérifié avant d'accepter le changement.
+  /// Retourne false si l'ancien mot de passe est incorrect ou en cas
+  /// d'erreur réseau.
+  static Future<bool> changerMonMotDePasse({
+    required String ancienMotDePasse,
+    required String nouveauMotDePasse,
+  }) async {
+    if (currentUserID == null || _currentAccountId == null) return false;
+    try {
+      final row = await _supabase
+          .from('comptes')
+          .select('mot_de_passe')
+          .eq('id', _currentAccountId!)
+          .maybeSingle();
+      if (row == null || row['mot_de_passe'] != ancienMotDePasse) {
+        return false;
+      }
+
+      await _supabase
+          .from('comptes')
+          .update({'mot_de_passe': nouveauMotDePasse}).eq(
+              'id', _currentAccountId!);
+
+      unawaited(EmployeeRepository.instance.journaliserActivite(
+        action: 'modification',
+        cibleType: 'compte',
+        cibleId: _currentAccountId,
+        cibleLibelle: currentUserID,
+        details: {'champ': 'mot_de_passe', 'par': 'lui-même'},
+      ));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// ADMIN UNIQUEMENT : change le mot de passe d'un autre compte (pas
+  /// besoin de connaître l'ancien — utile pour une récupération/reset).
+  static Future<bool> adminChangerMotDePasse({
+    required String compteId,
+    required String nouveauMotDePasse,
+  }) async {
+    if (currentUserRole != 'admin') return false;
+    try {
+      await _supabase
+          .from('comptes')
+          .update({'mot_de_passe': nouveauMotDePasse}).eq('id', compteId);
+
+      unawaited(EmployeeRepository.instance.journaliserActivite(
+        action: 'modification',
+        cibleType: 'compte',
+        cibleId: compteId,
+        details: {'champ': 'mot_de_passe', 'par': currentUserID},
+      ));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ============================================================
+  //   GESTION DES COMPTES (ADMIN UNIQUEMENT)
+  // ============================================================
+
+  static Future<List<Map<String, dynamic>>> listerComptes() async {
+    if (currentUserRole != 'admin') return [];
+    try {
+      final rows =
+          await _supabase.from('comptes').select().order('identifiant');
+      return List<Map<String, dynamic>>.from(rows);
+    } catch (e) {
+      throw Exception("Erreur de chargement des comptes : $e");
+    }
+  }
+
+  static Future<void> ajouterCompte({
+    required String identifiant,
+    required String motDePasse,
+    required String role,
+    required String ville,
+    required List<String> services,
+  }) async {
+    if (currentUserRole != 'admin') return;
+    try {
+      await _supabase.from('comptes').insert({
+        'identifiant': identifiant,
+        'mot_de_passe': motDePasse,
+        'role': role,
+        'ville': ville,
+        'services': services,
+        'actif': true,
+        'bloque': false,
+      });
+      unawaited(EmployeeRepository.instance.journaliserActivite(
+        action: 'creation',
+        cibleType: 'compte',
+        cibleLibelle: identifiant,
+        ville: ville,
+        details: {'role': role, 'services': services},
+      ));
+    } catch (e) {
+      throw Exception("Erreur lors de la création du compte : $e");
+    }
+  }
+
+  static Future<void> modifierDroitsCompte({
+    required String compteId,
+    required String identifiantPourJournal,
+    required String role,
+    required String ville,
+    required List<String> services,
+  }) async {
+    if (currentUserRole != 'admin') return;
+    try {
+      await _supabase.from('comptes').update({
+        'role': role,
+        'ville': ville,
+        'services': services,
+      }).eq('id', compteId);
+      unawaited(EmployeeRepository.instance.journaliserActivite(
+        action: 'modification',
+        cibleType: 'compte',
+        cibleId: compteId,
+        cibleLibelle: identifiantPourJournal,
+        ville: ville,
+        details: {'role': role, 'services': services},
+      ));
+    } catch (e) {
+      throw Exception("Erreur lors de la modification du compte : $e");
+    }
+  }
+
+  static Future<void> definirBlocage({
+    required String compteId,
+    required String identifiantPourJournal,
+    required bool bloque,
+  }) async {
+    if (currentUserRole != 'admin') return;
+    try {
+      await _supabase.from('comptes').update({'bloque': bloque}).eq('id', compteId);
+      unawaited(EmployeeRepository.instance.journaliserActivite(
+        action: bloque ? 'blocage' : 'deblocage',
+        cibleType: 'compte',
+        cibleId: compteId,
+        cibleLibelle: identifiantPourJournal,
+      ));
+    } catch (e) {
+      throw Exception("Erreur lors du blocage/déblocage : $e");
+    }
+  }
+
+  static Future<void> definirActivation({
+    required String compteId,
+    required String identifiantPourJournal,
+    required bool actif,
+  }) async {
+    if (currentUserRole != 'admin') return;
+    try {
+      await _supabase.from('comptes').update({'actif': actif}).eq('id', compteId);
+      unawaited(EmployeeRepository.instance.journaliserActivite(
+        action: 'modification',
+        cibleType: 'compte',
+        cibleId: compteId,
+        cibleLibelle: identifiantPourJournal,
+        details: {'actif': actif},
+      ));
+    } catch (e) {
+      throw Exception("Erreur lors de l'activation/désactivation : $e");
+    }
+  }
+
+  static Future<void> supprimerCompte({
+    required String compteId,
+    required String identifiantPourJournal,
+  }) async {
+    if (currentUserRole != 'admin') return;
+    try {
+      await _supabase.from('comptes').delete().eq('id', compteId);
+      unawaited(EmployeeRepository.instance.journaliserActivite(
+        action: 'suppression',
+        cibleType: 'compte',
+        cibleId: compteId,
+        cibleLibelle: identifiantPourJournal,
+      ));
+    } catch (e) {
+      throw Exception("Erreur lors de la suppression du compte : $e");
+    }
+  }
 }
 
-
-
-}
+/// Petit helper pour lancer un Future sans attendre son résultat, sans
+/// avertissement de l'analyseur Dart (équivalent à `dart:async`'s
+/// `unawaited`, réécrit ici pour ne pas ajouter de dépendance).
+void unawaited(Future<void> future) {}

@@ -3,11 +3,22 @@ import 'employee_repository.dart';
 import 'evaluation_unlock_view.dart'; // ← déblocage évaluations (DEX)
 import 'auth_manager.dart';
 import 'login_screen.dart'; // ← LoginScreen, pour y revenir après déconnexion
+import 'change_password_dialog.dart'; // ← Changer son propre mot de passe
 
 class DirectorDashboardView extends StatefulWidget {
   final String targetCity;
+  // Optionnel : quand renseigné (ouverture par un compte admin depuis
+  // MainDashboard via Navigator.push), affiche une flèche retour dans la
+  // sidebar qui ramène à MainDashboard SANS déconnecter le compte. Les
+  // vrais comptes DEX (via login_screen.dart) n'utilisent pas ce paramètre
+  // et gardent leur comportement inchangé (Déconnexion → LoginScreen).
+  final VoidCallback? onBackToAdmin;
 
-  const DirectorDashboardView({super.key, required this.targetCity});
+  const DirectorDashboardView({
+    super.key,
+    required this.targetCity,
+    this.onBackToAdmin,
+  });
 
   @override
   State<DirectorDashboardView> createState() => _DirectorDashboardViewState();
@@ -30,6 +41,10 @@ class _DirectorDashboardViewState extends State<DirectorDashboardView> {
   // Replié par défaut ; s'ouvre au clic sur l'entête.
   bool _agentsRisqueExpanded = false;
 
+  // Quota mensuel de jours d'évaluation par agent, fixé par le Rep/DEX
+  // (EmployeeRepository.setMaxJoursEvaluation). null = pas de limite définie.
+  int? _maxJoursQuota;
+
   static const List<String> _kMonthNamesShort = [
     'Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Juin',
     'Juil', 'Août', 'Sep', 'Oct', 'Nov', 'Déc',
@@ -39,6 +54,16 @@ class _DirectorDashboardViewState extends State<DirectorDashboardView> {
   void initState() {
     super.initState();
     _loadData();
+    _chargerQuota();
+  }
+
+  Future<void> _chargerQuota() async {
+    try {
+      final q = await EmployeeRepository.instance.getMaxJoursEvaluation();
+      if (mounted) setState(() => _maxJoursQuota = q);
+    } catch (_) {
+      // Silencieux : le badge "jours évalués" reste simplement sans quota.
+    }
   }
 
   Future<void> _loadData() async {
@@ -91,6 +116,64 @@ class _DirectorDashboardViewState extends State<DirectorDashboardView> {
   double _scoreForMonth(Map<String, dynamic> agent, String? monthKey) {
     if (monthKey == null) return _calculateScore(agent);
     return _scoresByMonth(agent)[monthKey] ?? 0.0;
+  }
+
+  /// Dates distinctes (date_evaluation) d'un agent pour la période donnée :
+  /// un mois précis ("AAAA-MM"), ou le cumul complet si monthKey est null.
+  /// Même principe que côté ScoreView (reps), pour rester cohérent avec le
+  /// quota mensuel fixé par le Rep/DEX.
+  Set<String> _distinctEvalDatesForPeriod(Map<String, dynamic> agent, String? monthKey) {
+    final evals = agent['evaluations'] as List? ?? [];
+    final dates = <String>{};
+    for (final e in evals) {
+      final rawDate = (e['date_evaluation'] ?? '').toString();
+      if (rawDate.isEmpty) continue;
+      if (monthKey == null) {
+        dates.add(rawDate);
+        continue;
+      }
+      final parsed = DateTime.tryParse(rawDate);
+      if (parsed == null) continue;
+      final key = '${parsed.year}-${parsed.month.toString().padLeft(2, '0')}';
+      if (key == monthKey) dates.add(rawDate);
+    }
+    return dates;
+  }
+
+  /// Libellé "jours évalués" pour un agent sur la période donnée, ex :
+  /// "10/22 j." (mois précis, quota connu) ou "24 j. (cumul)" en vue "Tous".
+  String? _joursLabelForPeriod(Map<String, dynamic> agent, String? monthKey) {
+    final dates = _distinctEvalDatesForPeriod(agent, monthKey);
+    if (monthKey == null) {
+      if (dates.isEmpty) return null;
+      return "${dates.length} j. (cumul)";
+    }
+    if (dates.isEmpty && _maxJoursQuota == null) return null;
+    if (_maxJoursQuota == null) return "${dates.length} j. évalués";
+    return "${dates.length}/$_maxJoursQuota j.";
+  }
+
+  /// Petite pastille cyan pour l'info "jours évalués / quota" — couleur
+  /// volontairement distincte de l'ambre (meilleur agent/points) et du
+  /// rouge/orange (retards), pour rester immédiatement repérable dans le
+  /// classement du directeur comme dans celui des reps.
+  Widget _buildJoursBadge(String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.cyanAccent.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.cyanAccent.withOpacity(0.6)),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          color: Colors.cyanAccent,
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
   }
 
   /// Toutes les clés de mois ("AAAA-MM") présentes dans les évaluations,
@@ -366,6 +449,7 @@ Widget _buildAgentHeader(Map<String, dynamic> agent) {
   final String nom = agent['nom']?.toString() ?? "Nom";
   final String prenom = agent['prenom']?.toString() ?? "Inconnu";
   final double totalScore = _calculateScore(agent);
+  final String? joursLabel = _joursLabelForPeriod(agent, null);
 
   return Row(
     children: [
@@ -396,6 +480,10 @@ Widget _buildAgentHeader(Map<String, dynamic> agent) {
           Text("$totalScore", style: const TextStyle(color: Colors.amber, fontSize: 32, fontWeight: FontWeight.bold)),
           const Text("POINTS TOTAL", style: TextStyle(color: Colors.white24, fontSize: 10, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
+          if (joursLabel != null) ...[
+            _buildJoursBadge(joursLabel),
+            const SizedBox(height: 8),
+          ],
           _buildRetardBadge(_ponctualiteStats(agent)),
         ],
       ),
@@ -648,7 +736,18 @@ Widget _buildDetailRow(String categorie, List items) {
         children: [
           Padding(
             padding: const EdgeInsets.all(24.0),
-            child: Row(children: [const Icon(Icons.diamond, color: Colors.amber), const SizedBox(width: 10), Text("DIR. ${widget.targetCity}", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))]),
+            child: Row(children: [
+              if (widget.onBackToAdmin != null) ...[
+                IconButton(
+                  onPressed: widget.onBackToAdmin,
+                  icon: const Icon(Icons.arrow_back, color: Colors.white54, size: 18),
+                  tooltip: "Retour à l'espace admin",
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                ),
+                const SizedBox(width: 8),
+              ],
+              const Icon(Icons.diamond, color: Colors.amber), const SizedBox(width: 10), Text("DIR. ${widget.targetCity}", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))]),
           ),
           _buildNavTile("Tableau de bord", Icons.dashboard, () => setState(() {
             _selectedService = 'Tous';
@@ -669,6 +768,7 @@ Widget _buildDetailRow(String categorie, List items) {
             child: Divider(color: Colors.white12, height: 1),
           ),
           const SizedBox(height: 8),
+          _buildNavTile("Changer mon mot de passe", Icons.key_outlined, () => showChangePasswordDialog(context)),
           _buildNavTile("Déconnexion", Icons.logout, _confirmLogout, color: Colors.redAccent),
           const SizedBox(height: 12),
         ],
@@ -1000,6 +1100,7 @@ Widget _buildDetailRow(String categorie, List items) {
   Widget _buildHallOfFameSection(Map<String, dynamic> top, String? monthKey) {
     final retard = _ponctualiteStats(top);
     final double score = _scoreForMonth(top, monthKey);
+    final String? joursLabel = _joursLabelForPeriod(top, monthKey);
     final String periodLabel = monthKey == null ? "TOUTE PÉRIODE" : _monthLabel(monthKey).toUpperCase();
     return InkWell(
       onTap: () => _showAgentDetails(top),
@@ -1025,11 +1126,24 @@ Widget _buildDetailRow(String categorie, List items) {
                   const SizedBox(height: 4),
                   Text("Service : ${top['service'] ?? '—'}", style: const TextStyle(color: Colors.white60, fontSize: 12)),
                   const SizedBox(height: 8),
-                  _buildRetardBadge(retard),
+                  Row(
+                    children: [
+                      _buildRetardBadge(retard),
+                      if (joursLabel != null) ...[
+                        const SizedBox(width: 8),
+                        _buildJoursBadge(joursLabel),
+                      ],
+                    ],
+                  ),
                 ],
               ),
             ),
-            Text(score.toStringAsFixed(1), style: const TextStyle(color: Colors.amber, fontSize: 36, fontWeight: FontWeight.bold)),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(score.toStringAsFixed(1), style: const TextStyle(color: Colors.amber, fontSize: 36, fontWeight: FontWeight.bold)),
+              ],
+            ),
           ],
         ),
       ),
@@ -1182,6 +1296,7 @@ Widget _buildDetailRow(String categorie, List items) {
   final retard = _ponctualiteStats(agent);
   final double score = _scoreForMonth(agent, monthKey);
   final bool hasScore = score > 0;
+  final String? joursLabel = _joursLabelForPeriod(agent, monthKey);
   return InkWell(
       onTap: () => _showAgentDetails(agent),
       borderRadius: BorderRadius.circular(15),
@@ -1234,9 +1349,19 @@ Widget _buildDetailRow(String categorie, List items) {
             ),
             const Icon(Icons.arrow_forward_ios, size: 12, color: Colors.white10),
             const SizedBox(width: 10),
-            Text(
-              hasScore ? score.toStringAsFixed(1) : "—", 
-              style: TextStyle(color: hasScore ? Colors.blueAccent : Colors.white38, fontSize: 18, fontWeight: FontWeight.bold)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  hasScore ? score.toStringAsFixed(1) : "—", 
+                  style: TextStyle(color: hasScore ? Colors.blueAccent : Colors.white38, fontSize: 18, fontWeight: FontWeight.bold)
+                ),
+                if (joursLabel != null) ...[
+                  const SizedBox(height: 4),
+                  _buildJoursBadge(joursLabel),
+                ],
+              ],
             ),
           ],
           ),

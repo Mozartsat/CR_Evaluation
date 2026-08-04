@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'employee_repository.dart';
 
 // --- DONNÉES DES CRITÈRES (Inchangées) ---
 const List<Map<String, dynamic>> _kCriteria = [
@@ -102,6 +103,8 @@ class _AnimatedRankingCard extends StatefulWidget {
   final RankBadge badge;
   // "du mois" ou "toutes périodes" selon le sélecteur.
   final String periodLabel;
+  // Ex : "10/26 j." (jours évalués / quota mensuel) ou null si non pertinent.
+  final String? joursLabel;
 
   const _AnimatedRankingCard({
     required this.rank,
@@ -110,6 +113,7 @@ class _AnimatedRankingCard extends StatefulWidget {
     required this.onTap,
     required this.badge,
     this.periodLabel = "du mois",
+    this.joursLabel,
   });
 
   @override
@@ -300,17 +304,45 @@ class _AnimatedRankingCardState extends State<_AnimatedRankingCard>
                 // Un agent sans note est distingué visuellement (— en gris)
                 // plutôt que d'afficher "0.0 pts", pour ne pas le confondre
                 // avec un agent réellement mal noté.
-                Text(
-                  widget.displayScore > 0 ? "${widget.displayScore.toStringAsFixed(1)} pts" : "—",
-                  style: TextStyle(
-                      color: isBest
-                        ? Colors.amber
-                        : isNominated
-                            ? Colors.lightBlueAccent
-                            : (widget.displayScore > 0 ? Colors.white : Colors.white38),
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15,
-                  ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      widget.displayScore > 0 ? "${widget.displayScore.toStringAsFixed(1)} pts" : "—",
+                      style: TextStyle(
+                          color: isBest
+                            ? Colors.amber
+                            : isNominated
+                                ? Colors.lightBlueAccent
+                                : (widget.displayScore > 0 ? Colors.white : Colors.white38),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
+                    if (widget.joursLabel != null) ...[
+                      const SizedBox(height: 5),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                        decoration: BoxDecoration(
+                          // Cyan : volontairement distinct du violet (score),
+                          // de l'ambre (Meilleur Agent) et du bleu (Nominé),
+                          // pour que cette info reste immédiatement repérable.
+                          color: Colors.cyanAccent.withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: Colors.cyanAccent.withOpacity(0.6)),
+                        ),
+                        child: Text(
+                          widget.joursLabel!,
+                          style: const TextStyle(
+                            color: Colors.cyanAccent,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ],
             ),
@@ -325,11 +357,19 @@ class _AnimatedRankingCardState extends State<_AnimatedRankingCard>
 class ScoreView extends StatefulWidget {
   final List<Map<String, dynamic>> employees;
   final List<Map<String, dynamic>> allCityEmployees;
+  // Optionnels : s'ils sont fournis, la vue se recharge elle-même depuis
+  // Supabase à l'ouverture (et via le bouton actualiser), pour ne jamais
+  // afficher des évaluations déjà supprimées/modifiées ailleurs (ex :
+  // suppression d'une session dans "Déblocage évaluations").
+  final String? ville;
+  final String? service;
 
   const ScoreView({
     super.key,
     required this.employees,
     required this.allCityEmployees,
+    this.ville,
+    this.service,
   });
 
   @override
@@ -340,6 +380,63 @@ class _ScoreViewState extends State<ScoreView> {
   OverlayEntry? _overlayEntry;
   String _searchQuery = ''; // ← AJOUTER
   final _searchCtrl = TextEditingController(); // ← AJOUTER
+
+  // Copies locales mutables : initialisées avec ce que le parent a fourni,
+  // puis rafraîchies depuis Supabase si widget.ville est renseigné — afin
+  // que les suppressions/modifications faites ailleurs (ex : suppression
+  // d'une session dans "Déblocage évaluations") soient bien reflétées ici,
+  // au lieu de rester sur les données potentiellement obsolètes reçues à
+  // la construction du widget.
+  late List<Map<String, dynamic>> _employees = widget.employees;
+  late List<Map<String, dynamic>> _allCityEmployees = widget.allCityEmployees;
+  bool _isRefreshing = false;
+
+  // Quota mensuel de jours d'évaluation par agent, fixé par le Rep/DEX
+  // (EmployeeRepository.setMaxJoursEvaluation). null = pas de limite définie.
+  int? _maxJoursQuota;
+
+  @override
+  void initState() {
+    super.initState();
+    _chargerQuota();
+    if (widget.ville != null) _refreshFromRepository();
+  }
+
+  /// Recharge les agents (et leurs évaluations imbriquées) depuis Supabase,
+  /// puis réapplique le filtre ville/service local. Nécessaire car cette
+  /// vue reçoit des listes déjà filtrées au moment de la navigation, qui ne
+  /// se mettent pas à jour toutes seules si une évaluation est supprimée
+  /// ou modifiée ailleurs pendant que l'utilisateur reste sur cet écran.
+  Future<void> _refreshFromRepository() async {
+    if (widget.ville == null) return;
+    setState(() => _isRefreshing = true);
+    try {
+      await EmployeeRepository.instance.init();
+      if (!mounted) return;
+      setState(() {
+        _employees = EmployeeRepository.instance.getByCityService(
+          widget.ville!,
+          widget.service ?? '',
+        );
+        _allCityEmployees = EmployeeRepository.instance.employees
+            .where((e) => e['ville'] == widget.ville)
+            .toList();
+      });
+    } catch (_) {
+      // Silencieux : on garde l'affichage précédent si le rechargement échoue.
+    } finally {
+      if (mounted) setState(() => _isRefreshing = false);
+    }
+  }
+
+  Future<void> _chargerQuota() async {
+    try {
+      final q = await EmployeeRepository.instance.getMaxJoursEvaluation();
+      if (mounted) setState(() => _maxJoursQuota = q);
+    } catch (_) {
+      // Silencieux : le badge "jours évalués" reste simplement sans quota.
+    }
+  }
 
   // Mois / année actuellement affichés dans les deux panneaux.
   // Par défaut : mois et année en cours. On reste sur l'année en cours
@@ -354,6 +451,39 @@ class _ScoreViewState extends State<ScoreView> {
     'Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin',
     'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre',
   ];
+
+  /// Dates distinctes (date_evaluation) d'un agent pour la période affichée :
+  /// le mois sélectionné, ou le cumul complet si "Tous" est actif.
+  Set<String> _distinctEvalDatesForPeriod(Map<String, dynamic> emp) {
+    final evaluations = emp['evaluations'] as List? ?? [];
+    final dates = <String>{};
+    for (final ev in evaluations) {
+      final rawDate = (ev['date_evaluation'] ?? '').toString();
+      if (rawDate.isEmpty) continue;
+      if (_showAllMonths) {
+        dates.add(rawDate);
+        continue;
+      }
+      final parsed = DateTime.tryParse(rawDate);
+      if (parsed != null && parsed.year == _selectedYear && parsed.month == _selectedMonth) {
+        dates.add(rawDate);
+      }
+    }
+    return dates;
+  }
+
+  /// Libellé "jours évalués" affiché sous le score de chaque agent, ex :
+  /// "10/26 j." (mois précis, quota connu) ou "24 j. (cumul)" en vue "Tous".
+  String? _joursLabelForSelectedPeriod(Map<String, dynamic> emp) {
+    final dates = _distinctEvalDatesForPeriod(emp);
+    if (_showAllMonths) {
+      if (dates.isEmpty) return null;
+      return "${dates.length} j. (cumul)";
+    }
+    if (dates.isEmpty && _maxJoursQuota == null) return null;
+    if (_maxJoursQuota == null) return "${dates.length} j. évalués";
+    return "${dates.length}/$_maxJoursQuota j.";
+  }
 
   double _calculateTotalScore(Map<String, dynamic> emp) {
     final evaluations = emp['evaluations'] as List? ?? [];
@@ -400,20 +530,62 @@ class _ScoreViewState extends State<ScoreView> {
     );
   }
 
-  void _showOverlay(BuildContext context, Offset position, Map<String, dynamic> evaluation) {
-  _hideOverlay();
-  final items = evaluation['items_evalues'] as List? ?? [];
+  /// Libellé du 1er champ de contexte selon le service de l'agent (même
+  /// mapping que _fieldsConfig côté evaluation_personnel_view.dart).
+  String _label1ForService(String? service) {
+    final s = (service ?? '').toLowerCase();
+    if (s.contains('piste')) return "Chef d'équipe";
+    if (s.contains('grg')) return "Agents";
+    if (s.contains('fret')) return "Chef d'équipe";
+    if (s.contains('ops')) return "Agent";
+    return "GDV";
+  }
 
-  // Hauteur estimée du popup
-  const popupHeight = 320.0;
-  const popupWidth = 380.0;
+  IconData _icon1ForService(String? service) {
+    final s = (service ?? '').toLowerCase();
+    if (s.contains('piste') || s.contains('grg') || s.contains('fret')) {
+      return Icons.groups_outlined;
+    }
+    if (s.contains('ops')) return Icons.person_outline;
+    return Icons.badge_outlined;
+  }
+
+  /// Les colonnes `gdv` / `poste` / `numero_vol` peuvent contenir plusieurs
+  /// valeurs jointes par ", " (une session peut avoir plusieurs GDV/Agents,
+  /// chacun avec son propre poste et son propre vol — voir
+  /// evaluation_personnel_view.dart / _SessionEntry). On les redécoupe ici
+  /// pour les réafficher ligne par ligne.
+  List<String> _splitCombined(String s) =>
+      s.isEmpty ? [] : s.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+
+  void _showOverlay(
+    BuildContext context,
+    Offset position,
+    Map<String, dynamic> evaluation, [
+    String? service,
+  ]) {
+  _hideOverlay();
+
+  // Hauteur estimée du popup, agrandie dynamiquement selon le nombre de
+  // lignes GDV/poste/vol (une session peut en avoir plusieurs), pour que
+  // le popup reste bien positionné à l'écran même quand il grandit.
+  final gdvCount = _splitCombined((evaluation['gdv'] ?? '').toString()).length;
+  final posteCount = _splitCombined((evaluation['poste'] ?? '').toString()).length;
+  final volCount = _splitCombined((evaluation['numero_vol'] ?? '').toString()).length;
+  final rowCount = [gdvCount, posteCount, volCount].reduce((a, b) => a > b ? a : b);
+  final itemsCount = (evaluation['items_evalues'] as List? ?? []).length;
+
+  final infoBlockHeight = rowCount == 0 ? 0.0 : 36.0 + rowCount * 26.0;
+  final criteriaBlockHeight = itemsCount == 0 ? 40.0 : (itemsCount * 34.0).clamp(0.0, 280.0);
+  final popupHeight = 120.0 + infoBlockHeight + criteriaBlockHeight;
+  const popupWidth = 420.0;
   final screenHeight = MediaQuery.of(context).size.height;
   final screenWidth = MediaQuery.of(context).size.width;
 
   // Si le popup dépasse en bas → l'afficher AU DESSUS du curseur
   double top = position.dy + 10;
   if (top + popupHeight > screenHeight) {
-    top = position.dy - popupHeight - 10;
+    top = (position.dy - popupHeight - 10).clamp(10.0, screenHeight);
   }
 
   // Si le popup dépasse à droite → le décaler à gauche
@@ -428,7 +600,7 @@ class _ScoreViewState extends State<ScoreView> {
       top: top,
       child: Material(
         color: Colors.transparent,
-        child: _buildModernPopup(items),
+        child: _buildModernPopup(evaluation, service),
       ),
     ),
   );
@@ -439,9 +611,36 @@ class _ScoreViewState extends State<ScoreView> {
     _overlayEntry = null;
   }
 
-  Widget _buildModernPopup(List<dynamic> items) {
+  /// Petite pastille d'info utilisée dans le bandeau GDV / Poste / N° de vol
+  /// du popup "Détails de l'évaluation".
+  Widget _popupInfoChip(IconData icon, String label, String value) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 13, color: Colors.purpleAccent),
+        const SizedBox(width: 5),
+        Text("$label : ", style: const TextStyle(color: Colors.white54, fontSize: 11)),
+        Text(
+          value,
+          style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildModernPopup(Map<String, dynamic> evaluation, [String? service]) {
+  final items = evaluation['items_evalues'] as List? ?? [];
+  final gdvList = _splitCombined((evaluation['gdv'] ?? '').toString());
+  final posteList = _splitCombined((evaluation['poste'] ?? '').toString());
+  final volList = _splitCombined((evaluation['numero_vol'] ?? '').toString());
+  final rowCount = [gdvList.length, posteList.length, volList.length]
+      .reduce((a, b) => a > b ? a : b);
+  final hasVolInfo = rowCount > 0;
+  final label1 = _label1ForService(service);
+  final icon1 = _icon1ForService(service);
+
   return Container(
-    width: 380,
+    width: 420,
     padding: const EdgeInsets.all(16),
     decoration: BoxDecoration(
       color: const Color(0xFF16122D).withOpacity(0.97),
@@ -467,12 +666,54 @@ class _ScoreViewState extends State<ScoreView> {
             style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
           ),
         ]),
+        // Bandeau GDV / Poste / N° de vol : une ligne par GDV/Agent/Chef
+        // d'équipe de la session, chacun avec SON poste et SON vol — pour
+        // que le rep ait toutes les infos en un coup d'œil, sans avoir à
+        // ouvrir un autre écran, même quand la session compte plusieurs GDV.
+        if (hasVolInfo) ...[
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.04),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.white10),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (int i = 0; i < rowCount; i++)
+                  Padding(
+                    padding: EdgeInsets.only(bottom: i == rowCount - 1 ? 0 : 6),
+                    child: Wrap(
+                      spacing: 16,
+                      runSpacing: 4,
+                      children: [
+                        if (i < gdvList.length)
+                          _popupInfoChip(icon1, rowCount > 1 ? "$label1 ${i + 1}" : label1, gdvList[i]),
+                        if (i < posteList.length)
+                          _popupInfoChip(Icons.meeting_room_outlined, "Poste", posteList[i]),
+                        if (i < volList.length)
+                          _popupInfoChip(Icons.flight, "Vol", volList[i]),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
         const Divider(color: Colors.white10, height: 20),
         if (items.isEmpty)
           const Text("Aucun détail enregistré.", style: TextStyle(color: Colors.white54))
         else
           ConstrainedBox(
             constraints: const BoxConstraints(maxHeight: 280),
+            // Pas de Scrollbar ici : à l'intérieur d'un OverlayEntry (popup au
+            // survol), un Scrollbar sans ScrollController explicite ne trouve
+            // pas de position à laquelle s'attacher et provoque des erreurs
+            // de rendu (gel de l'interface au clic). Le défilement à la
+            // molette/au glissement reste pleinement fonctionnel sans lui.
             child: ListView.builder(
               shrinkWrap: true,
               itemCount: items.length,
@@ -548,7 +789,7 @@ class _ScoreViewState extends State<ScoreView> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.employees.isEmpty) {
+    if (_employees.isEmpty) {
       return Center(
         child: Container(
           padding: const EdgeInsets.all(24),
@@ -566,7 +807,7 @@ class _ScoreViewState extends State<ScoreView> {
     }
     
     // ← AJOUTER juste avant return Scaffold
-final filteredEmployees = widget.employees.where((emp) {
+final filteredEmployees = _employees.where((emp) {
   if (_searchQuery.isEmpty) return true;
   final q = _searchQuery.toLowerCase();
   return (emp['nom'] ?? '').toLowerCase().contains(q) ||
@@ -593,7 +834,7 @@ rankedList.sort(
 // Meilleur score de la période sélectionnée par service, dans la même
 // ville (tous services confondus).
 final Map<String, double> bestScoreByService = {};
-for (final emp in widget.allCityEmployees) {
+for (final emp in _allCityEmployees) {
   final svc = emp['service'] ?? '';
   final periodScore = _scoreForSelectedPeriod(emp);
   if (periodScore <= 0) continue;
@@ -719,6 +960,7 @@ Expanded(
                             displayScore: empPeriodScore,
                             badge: badge,
                             periodLabel: _showAllMonths ? "(toutes périodes)" : "du mois",
+                            joursLabel: _joursLabelForSelectedPeriod(emp),
                             onTap: () {
                               print("Clic sur : ${emp['nom']}");
                             },
@@ -854,6 +1096,18 @@ Expanded(
             ),
           ),
           const Spacer(),
+          if (widget.ville != null)
+            IconButton(
+              onPressed: _isRefreshing ? null : _refreshFromRepository,
+              tooltip: "Actualiser (récupère les dernières suppressions/modifications)",
+              icon: _isRefreshing
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.purpleAccent),
+                    )
+                  : const Icon(Icons.refresh, color: Colors.purpleAccent, size: 18),
+            ),
           if (!isCurrentMonth || _showAllMonths)
             TextButton.icon(
               onPressed: () => setState(() {
@@ -994,7 +1248,7 @@ Expanded(
                                   onEnter: (event) {
                                     final RenderBox box = cellContext.findRenderObject() as RenderBox;
                                     final offset = box.localToGlobal(Offset.zero);
-                                    _showOverlay(context, offset, eval as Map<String, dynamic>);
+                                    _showOverlay(context, offset, eval as Map<String, dynamic>, emp['service']?.toString());
                                   },
                                   onExit: (event) {
                                     _hideOverlay();

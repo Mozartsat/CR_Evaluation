@@ -2,13 +2,45 @@ import 'package:flutter/material.dart';
 import 'employee_repository.dart';
 import 'package:flutter/services.dart';
 
-class EvaluationPersonnelView extends StatefulWidget {
+/// Décrit les champs de session à afficher selon le profil de superviseur
+/// (supkppnr / supopspnr / suppistepnr / supgrgpnr / supfretpnr).
+class _SessionFieldsConfig {
+  final String label1;
+  final IconData icon1;
+  final List<String> posteOptions;
+  final bool showNumeroVol;
+  
+
+  const _SessionFieldsConfig({
+    required this.label1,
+    required this.icon1,
+    required this.posteOptions,
+    required this.showNumeroVol,
+  });
+}
+
+/// Une ligne de contexte de session : un GDV/Agent/Chef d'équipe avec SON
+/// propre poste et SON propre N° de vol. Plusieurs lignes possibles (ajout
+/// via le "+"), ex : 2 GDV en relève sur la même vacation avec des postes
+/// différents.
+class _SessionEntry {
+  final TextEditingController identifiantCtrl = TextEditingController();
+  final TextEditingController numeroVolCtrl = TextEditingController();
+  String? poste;
+
+  void dispose() {
+    identifiantCtrl.dispose();
+    numeroVolCtrl.dispose();
+  }
+}
+
+class EvaluationView extends StatefulWidget {
   final List<Map<String, dynamic>> employees;
   final String targetVille;
   final String targetService;
   final Future<void> Function() onUpdate;
 
-  const EvaluationPersonnelView({
+  const EvaluationView({
     super.key,
     required this.employees,
     required this.targetVille,
@@ -17,22 +49,35 @@ class EvaluationPersonnelView extends StatefulWidget {
   });
 
   @override
-  State<EvaluationPersonnelView> createState() =>
-      _EvaluationPersonnelViewState();
+  State<EvaluationView> createState() =>
+      _EvaluationViewState();
 }
 
-class _EvaluationPersonnelViewState extends State<EvaluationPersonnelView> {
+class _EvaluationViewState extends State<EvaluationView> {
   final Set<String> _selectedForCancel = {};
   final FocusNode _focusNode = FocusNode();
   bool _isControlDown = false;
+  // Permet de replier l'en-tête "Session d'évaluation" (Date/Vacation/
+  // Évaluateur + lignes GDV/poste/vol) pour redonner de la place aux listes
+  // "Liste des agents" / "Évalués" en dessous. La ligne de statut résumée
+  // ("Session prête — ...") reste visible même replié.
+  bool _sessionHeaderExpanded = true;
   String _searchQuery = '';
-final _searchCtrl = TextEditingController();
-
+  final _searchCtrl = TextEditingController();
 
   // Champs de session
   final _vacationController = TextEditingController();
   final _evaluateurController = TextEditingController();
   DateTime _sessionDate = DateTime.now();
+
+  // --- Infos complémentaires de session (à renseigner avant de commencer) ---
+  // Chaque ligne = un GDV/Agent/Chef d'équipe AVEC son propre poste et son
+  // propre N° de vol (ajout d'une nouvelle ligne complète via le "+").
+  final List<_SessionEntry> _sessionEntries = [_SessionEntry()];
+
+  // Contrôleur de défilement dédié au panneau de recherche (évite tout
+  // conflit de PrimaryScrollController entre plusieurs zones défilantes).
+  final ScrollController _searchResultsScrollCtrl = ScrollController();
 
   // --- Recherche / modification d'une évaluation déjà enregistrée ---
   bool _showEditSearch = false;
@@ -44,9 +89,99 @@ final _searchCtrl = TextEditingController();
   bool _hasSearchedEdit = false;
   List<Map<String, dynamic>> _editSearchResults = [];
 
-  bool get _sessionReady =>
-      _vacationController.text.trim().isNotEmpty &&
-      _evaluateurController.text.trim().isNotEmpty;
+  /// Configuration des champs de session (1er champ, options "Poste", et
+  /// présence ou non du N° de vol) selon le profil de superviseur, déduit
+  /// du service ciblé (targetService). Chaque ligne de _sessionEntries
+  /// est utilisée pour "GDV" / "Agent" / "Chef d'équipe" / "Agents" selon le
+  /// profil : seul le libellé affiché change, la valeur saisie est toujours
+  /// persistée dans la colonne `gdv` de la table `evaluations`.
+  _SessionFieldsConfig get _fieldsConfig {
+    final s = widget.targetService.toLowerCase();
+    if (s.contains('piste')) {
+      // suppistepnr
+      return const _SessionFieldsConfig(
+        label1: "Chef d'équipe",
+        icon1: Icons.groups_outlined,
+        posteOptions: ["Coordination (CZA)", "Tâches Ordinaires (T.O)"],
+        showNumeroVol: false,
+      );
+    }
+    if (s.contains('garage')) {
+      // supgrgpnr
+      return const _SessionFieldsConfig(
+        label1: "Agents",
+        icon1: Icons.groups_outlined,
+        posteOptions: [
+          "Visite Préventive (V.P)",
+          "Visite Curative (V.C)",
+          "Plein Carburant (P.C)",
+          "Courses ADM (C.A)",
+        ],
+        showNumeroVol: false,
+      );
+    }
+    if (s.contains('fret')) {
+      // supfretpnr
+      return const _SessionFieldsConfig(
+        label1: "Chef d'équipe",
+        icon1: Icons.groups_outlined,
+        posteOptions: [
+          "Import (IM)",
+          "Export (EX)",
+          "Acceptation (AC)",
+          "Palletisation (PA)",
+          "Transfert Douane (T.D)",
+        ],
+        showNumeroVol: false,
+      );
+    }
+    if (s.contains('ops')) {
+      // supopspnr
+      return const _SessionFieldsConfig(
+        label1: "Agent",
+        icon1: Icons.person_outline,
+        posteOptions: [
+          "Back Office",
+          "Front Office",
+          "Ops Service",
+          "Vols ADHOC",
+        ],
+        showNumeroVol: true,
+      );
+    }
+    // Par défaut : supkppnr (GDV / Front Office / Back Office / N° de vol).
+    return const _SessionFieldsConfig(
+      label1: "GDV",
+      icon1: Icons.badge_outlined,
+      posteOptions: ["Front Office", "Back Office"],
+      showNumeroVol: true,
+    );
+  }
+
+  bool get _sessionReady {
+    final cfg = _fieldsConfig;
+    final base = _vacationController.text.trim().isNotEmpty &&
+        _evaluateurController.text.trim().isNotEmpty &&
+        _sessionEntries.isNotEmpty &&
+        _sessionEntries.every((e) =>
+            e.identifiantCtrl.text.trim().isNotEmpty &&
+            e.poste != null &&
+            (!cfg.showNumeroVol || e.numeroVolCtrl.text.trim().isNotEmpty));
+    return base;
+  }
+
+  /// Valeurs combinées (une par ligne, dans l'ordre) pour les colonnes
+  /// `gdv` / `poste` / `numero_vol` de la table `evaluations` — pas de
+  /// changement de schéma nécessaire : chaque colonne texte porte la liste
+  /// jointe par ", ", dans le même ordre pour les 3 colonnes, ce qui permet
+  /// de les réassocier ligne par ligne à l'affichage (popup côté reps).
+  String get _gdvCombine =>
+      _sessionEntries.map((e) => e.identifiantCtrl.text.trim()).join(', ');
+  String get _posteCombine =>
+      _sessionEntries.map((e) => e.poste ?? '').join(', ');
+  String get _numeroVolCombine => _fieldsConfig.showNumeroVol
+      ? _sessionEntries.map((e) => e.numeroVolCtrl.text.trim()).join(', ')
+      : '';
 
   List<Map<String, dynamic>> get _filteredEmployees => widget.employees
       .where(
@@ -156,6 +291,10 @@ final _searchCtrl = TextEditingController();
   void dispose() {
     _vacationController.dispose();
     _evaluateurController.dispose();
+    for (final e in _sessionEntries) {
+      e.dispose();
+    }
+    _searchResultsScrollCtrl.dispose();
     _searchCtrl.dispose(); // ← AJOUTER
     _editVacationCtrl.dispose();
     _editEvaluateurCtrl.dispose();
@@ -199,6 +338,143 @@ final _searchCtrl = TextEditingController();
     );
   }
 
+  void _ajouterSessionEntry() {
+    setState(() => _sessionEntries.add(_SessionEntry()));
+  }
+
+  void _retirerSessionEntry(int index) {
+    setState(() {
+      _sessionEntries[index].dispose();
+      _sessionEntries.removeAt(index);
+    });
+  }
+
+  /// Sélecteur "Poste" pour UNE ligne de session donnée (chaque ligne a son
+  /// propre poste, indépendant des autres lignes).
+  Widget _posteSelectorForEntry(_SessionEntry entry, List<String> options) {
+    return Container(
+      constraints: const BoxConstraints(minHeight: 40),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Wrap(
+        alignment: WrapAlignment.start,
+        spacing: 6,
+        runSpacing: 6,
+        children: options.map((opt) {
+          final selected = entry.poste == opt;
+          return GestureDetector(
+            onTap: () => setState(() => entry.poste = opt),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              decoration: BoxDecoration(
+                color: selected ? Colors.purpleAccent.withOpacity(0.25) : Colors.transparent,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: selected ? Colors.purpleAccent : Colors.white12,
+                ),
+              ),
+              child: Text(
+                opt,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: selected ? Colors.purpleAccent : Colors.white54,
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  /// Une ligne complète de contexte de session : identifiant (GDV/Agent/Chef
+  /// d'équipe) + SON poste + SON N° de vol. Ajouter un GDV via le "+" ajoute
+  /// donc automatiquement sa propre ligne poste (et vol si applicable), au
+  /// lieu d'un unique poste/vol partagé pour toute la session.
+  Widget _buildSessionEntryRow(int index, _SessionFieldsConfig cfg) {
+    final entry = _sessionEntries[index];
+    final numbered = _sessionEntries.length > 1;
+    return Padding(
+      padding: EdgeInsets.only(bottom: index == _sessionEntries.length - 1 ? 0 : 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: TextField(
+              controller: entry.identifiantCtrl,
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+              onChanged: (_) => setState(() {}),
+              decoration: _sessionFieldDecoration(
+                numbered ? "${cfg.label1} ${index + 1}" : cfg.label1,
+                cfg.icon1,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            flex: cfg.showNumeroVol ? 2 : 3,
+            child: _posteSelectorForEntry(entry, cfg.posteOptions),
+          ),
+          if (cfg.showNumeroVol) ...[
+            const SizedBox(width: 10),
+            Expanded(
+              child: TextField(
+                controller: entry.numeroVolCtrl,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                onChanged: (_) => setState(() {}),
+                decoration: _sessionFieldDecoration("N° de vol", Icons.flight),
+              ),
+            ),
+          ],
+          if (_sessionEntries.length > 1) ...[
+            const SizedBox(width: 4),
+            IconButton(
+              onPressed: () => _retirerSessionEntry(index),
+              icon: const Icon(Icons.remove_circle_outline, size: 18, color: Colors.redAccent),
+              tooltip: "Retirer cette ligne",
+              constraints: const BoxConstraints(),
+              padding: const EdgeInsets.all(6),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Bouton "+" : ajoute une nouvelle ligne complète (identifiant+poste+vol).
+  Widget _addSessionEntryButton(String label1) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: GestureDetector(
+        onTap: _ajouterSessionEntry,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white24),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.add_circle_outline, size: 15, color: Colors.purpleAccent),
+              const SizedBox(width: 6),
+              Text(
+                "Ajouter ${label1.toLowerCase()}",
+                style: const TextStyle(color: Colors.purpleAccent, fontSize: 11, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   void _showCancelDialog(Map<String, dynamic> emp) {
     showDialog(
       context: context,
@@ -218,14 +494,21 @@ final _searchCtrl = TextEditingController();
             child: const Text("Non", style: TextStyle(color: Colors.white70)),
           ),
           ElevatedButton(
-            onPressed: () async {
+            onPressed: () {
+              // Cette évaluation n'a pas encore été persistée en base (elle
+              // ne le sera qu'au "TERMINER LA SESSION") : on se contente donc
+              // d'un reset purement local. Appeler EmployeeRepository.init()
+              // ici remplacerait TOUS les agents par des objets fraîchement
+              // rechargés depuis Supabase, qui ne portent pas les indicateurs
+              // locaux isValidated/evaluationScore des AUTRES agents encore
+              // en attente — ce qui effaçait toute la liste "Évalués" au lieu
+              // de n'annuler que cet agent.
               setState(() {
                 emp['isValidated'] = false;
                 emp['evaluationScore'] = null;
                 emp['evaluationSelections'] = null;
+                _selectedForCancel.remove(emp['id']);
               });
-              await EmployeeRepository.instance.init();
-              widget.onUpdate();
               Navigator.pop(ctx);
             },
             style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
@@ -287,6 +570,20 @@ final _searchCtrl = TextEditingController();
                         _infoRow(Icons.schedule, "Vacation", _vacationController.text.trim()),
                         const SizedBox(height: 8),
                         _infoRow(Icons.person_outline, "Évaluateur", _evaluateurController.text.trim()),
+                        for (int i = 0; i < _sessionEntries.length; i++) ...[
+                          const SizedBox(height: 8),
+                          _infoRow(
+                            _fieldsConfig.icon1,
+                            _sessionEntries.length > 1 ? "${_fieldsConfig.label1} ${i + 1}" : _fieldsConfig.label1,
+                            _sessionEntries[i].identifiantCtrl.text.trim(),
+                          ),
+                          const SizedBox(height: 8),
+                          _infoRow(Icons.meeting_room_outlined, "Poste", _sessionEntries[i].poste ?? '—'),
+                          if (_fieldsConfig.showNumeroVol) ...[
+                            const SizedBox(height: 8),
+                            _infoRow(Icons.flight, "N° de vol", _sessionEntries[i].numeroVolCtrl.text.trim()),
+                          ],
+                        ],
                         const SizedBox(height: 16),
                         Text(
                           "$total agent(s) évalué(s)",
@@ -554,7 +851,7 @@ final _searchCtrl = TextEditingController();
             "Cette session date de plus de 48h "
             "(${_sessionDate.day.toString().padLeft(2, '0')}/${_sessionDate.month.toString().padLeft(2, '0')}/${_sessionDate.year} · "
             "vacation « ${_vacationController.text.trim()} »).\n\n"
-            "Demandez à un Rep, un DEX ou un Admin de débloquer cette date "
+            "Demandez au Rep de débloquer cette date "
             "avant de pouvoir enregistrer ces évaluations.",
       );
       return;
@@ -617,6 +914,10 @@ final _searchCtrl = TextEditingController();
         }
 
         final estRecalage = recalages.contains(emp['id'].toString());
+        // NOTE REPO : `enregistrerEvaluationControlee` doit accepter les
+        // nouveaux paramètres nommés `gdv`, `poste` et `numeroVol` et les
+        // faire persister dans les colonnes correspondantes de la table
+        // `evaluations` (ex : gdv text, poste text, numero_vol text).
         final resultat = await EmployeeRepository.instance.enregistrerEvaluationControlee(
           agentId: emp['id'],
           scoreTotal: emp['evaluationScore'],
@@ -625,6 +926,9 @@ final _searchCtrl = TextEditingController();
           vacation: _vacationController.text.trim(),
           dateEvaluation: _sessionDate,
           commentaire: estRecalage ? raisonRecalage : null,
+          gdv: _gdvCombine,
+          poste: _posteCombine,
+          numeroVol: _numeroVolCombine.isEmpty ? null : _numeroVolCombine,
         );
         rapport[emp['id'].toString()] = resultat;
         onProgress?.call(idx + 1, total);
@@ -688,7 +992,41 @@ final _searchCtrl = TextEditingController();
     );
   }
 
+  /// Ré-ouvre la grille de notation pour un agent déjà évalué DANS CETTE
+  /// SESSION (pas encore enregistré en base), pré-remplie avec ses choix
+  /// actuels, pour permettre de les amender avant "TERMINER LA SESSION".
+  void _editSessionEvaluation(Map<String, dynamic> emp) {
+    final currentSelections = emp['evaluationSelections'] != null
+        ? List<int?>.from(emp['evaluationSelections'])
+        : null;
+    showDialog(
+      context: context,
+      builder: (ctx) => EvaluationDialog(
+        employee: emp,
+        criteria: _criteria,
+        initialSelections: currentSelections,
+        onValidate: (selections) {
+          double totalScore = 0.0;
+          for (int i = 0; i < _criteria.length; i++) {
+            if (selections[i] != null) {
+              totalScore += _criteria[i]['options'][selections[i]]['score'];
+            }
+          }
+          setState(() {
+            emp['evaluationScore'] = totalScore;
+            emp['evaluationSelections'] = selections;
+          });
+          Navigator.pop(ctx);
+        },
+      ),
+    );
+  }
+
   void _cancelMultipleEvaluations() {
+    // Comme pour _showCancelDialog : ces évaluations ne sont pas encore
+    // persistées, donc pas d'appel à widget.onUpdate() ici (qui déclenche
+    // côté écran parent un rechargement depuis Supabase et effacerait le
+    // statut local des agents non concernés par cette suppression).
     for (var emp in _filteredEmployees) {
       if (_selectedForCancel.contains(emp['id'])) {
         emp['isValidated'] = false;
@@ -697,7 +1035,6 @@ final _searchCtrl = TextEditingController();
       }
     }
     _selectedForCancel.clear();
-    widget.onUpdate();
     setState(() {});
   }
 
@@ -786,11 +1123,90 @@ final _searchCtrl = TextEditingController();
             "Cette évaluation date de plus de 48h "
             "(${rawDate ?? '—'} · vacation « ${vacation ?? ''} »).\n\n"
             "Elle ne peut plus être modifiée sans déblocage préalable "
-            "d'un Rep, d'un DEX ou d'un Admin.",
+            "du Rep, ou DEX.",
       );
       return;
     }
     _openEditDialog(evaluation);
+  }
+
+  /// Supprime définitivement une évaluation déjà enregistrée en base,
+  /// après confirmation et vérification du verrou 48h.
+  Future<void> _onTapSupprimerResultat(Map<String, dynamic> evaluation) async {
+    final rawDate = evaluation['date_evaluation'] as String?;
+    final date = rawDate != null ? DateTime.tryParse(rawDate) : null;
+    final vacation = evaluation['vacation'] as String?;
+
+    final autorise = date != null &&
+        await _dateAutorisee(date, vacation: vacation);
+
+    if (!autorise) {
+      _showVerrouPopup(
+        message:
+            "Cette évaluation date de plus de 48h "
+            "(${rawDate ?? '—'} · vacation « ${vacation ?? ''} »).\n\n"
+            "Elle ne peut plus être supprimée sans déblocage préalable "
+            "du Rep, ou DEX.",
+      );
+      return;
+    }
+
+    final agent = _agentDeEvaluation(evaluation);
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF16122D),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 40),
+        title: Text(
+          "Supprimer l'évaluation de ${agent['nom']} ${agent['prenom']} ?",
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
+        ),
+        content: const Text(
+          "Cette action est définitive et ne peut pas être annulée.",
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white70, fontSize: 12),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Annuler", style: TextStyle(color: Colors.white54)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            child: const Text("Supprimer"),
+          ),
+        ],
+      ),
+    );
+    if (confirme != true) return;
+
+    try {
+      // NOTE REPO : nécessite une méthode `supprimerEvaluation({required
+      // String evaluationId})` côté EmployeeRepository, qui exécute la
+      // suppression correspondante en base (Supabase .delete()).
+      await EmployeeRepository.instance.supprimerEvaluation(
+        evaluationId: evaluation['id'].toString(),
+      );
+      await widget.onUpdate();
+      await _rechercherEvaluationsAModifier();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Évaluation supprimée'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Erreur : $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+    }
   }
 
   void _openEditDialog(Map<String, dynamic> evaluation) {
@@ -911,8 +1327,29 @@ final listDone = listDoneAll.where((e) {
                       style: const TextStyle(fontSize: 11, color: Colors.white54),
                     ),
                   ),
+                  const Spacer(),
+                  IconButton(
+                    onPressed: () => setState(() => _sessionHeaderExpanded = !_sessionHeaderExpanded),
+                    icon: Icon(
+                      _sessionHeaderExpanded ? Icons.expand_less : Icons.expand_more,
+                      color: Colors.white54,
+                      size: 20,
+                    ),
+                    tooltip: _sessionHeaderExpanded ? "Réduire la session" : "Développer la session",
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(4),
+                  ),
                 ]),
 
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 200),
+                  curve: Curves.easeInOut,
+                  alignment: Alignment.topCenter,
+                  child: !_sessionHeaderExpanded
+                      ? const SizedBox(height: 4)
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
                 const SizedBox(height: 12),
                 Row(children: [
                   // DATE
@@ -974,6 +1411,23 @@ final listDone = listDoneAll.where((e) {
 
                 ]),
 
+                const SizedBox(height: 10),
+                // Une ligne par GDV/Agent/Chef d'équipe, chacune avec SON
+                // propre poste et SON propre N° de vol (le "+" ajoute une
+                // ligne complète) → composition pilotée par _fieldsConfig
+                // selon le profil de superviseur (service ciblé).
+                Builder(builder: (context) {
+                  final cfg = _fieldsConfig;
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (int i = 0; i < _sessionEntries.length; i++)
+                        _buildSessionEntryRow(i, cfg),
+                      _addSessionEntryButton(cfg.label1),
+                    ],
+                  );
+                }),
+
                    const SizedBox(height: 10),
                  SizedBox(
   height: 34,
@@ -1004,26 +1458,48 @@ final listDone = listDoneAll.where((e) {
     ),
   ),
 ),
-
+                const SizedBox(height: 10),
+                          ],
+                        ),
+                ),
                 const SizedBox(height: 10),
                        
-                Row(children: [
-                  Icon(
-                    Icons.circle,
-                    size: 8,
-                    color: _sessionReady ? Colors.greenAccent : Colors.white24,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    _sessionReady
-                        ? "Session prête — ${_evaluateurController.text.trim()} · ${_vacationController.text.trim()}"
-                        : "Renseignez la vacation et l'évaluateur pour commencer",
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: _sessionReady ? Colors.white70 : Colors.white38,
+                Builder(builder: (context) {
+                  final cfg = _fieldsConfig;
+                  final entriesResume = _sessionEntries.map((e) {
+                    final bits = [
+                      e.identifiantCtrl.text.trim(),
+                      e.poste ?? '',
+                      if (cfg.showNumeroVol) "vol ${e.numeroVolCtrl.text.trim()}",
+                    ].where((s) => s.isNotEmpty).join(' · ');
+                    return bits;
+                  }).where((s) => s.isNotEmpty).join('  |  ');
+                  final resume = [
+                    _evaluateurController.text.trim(),
+                    _vacationController.text.trim(),
+                    entriesResume,
+                  ].where((s) => s.isNotEmpty).join(' · ');
+                  return Row(children: [
+                    Icon(
+                      Icons.circle,
+                      size: 8,
+                      color: _sessionReady ? Colors.greenAccent : Colors.white24,
                     ),
-                  ),
-                ]),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _sessionReady
+                            ? "Session prête — $resume"
+                            : "Renseignez la vacation, l'évaluateur, ${cfg.label1.toLowerCase()}, le poste"
+                                "${cfg.showNumeroVol ? ' et le n° de vol' : ''} pour commencer",
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: _sessionReady ? Colors.white70 : Colors.white38,
+                        ),
+                      ),
+                    ),
+                  ]);
+                }),
               ],
             ),
           ),
@@ -1058,15 +1534,6 @@ final listDone = listDoneAll.where((e) {
                         isDone: true,
                         selectedIds: _selectedForCancel,
                         onTap: (e) => _showCancelDialog(e),
-                        onSelectionChanged: (id, selected) {
-                          setState(() {
-                            if (selected) {
-                              _selectedForCancel.add(id);
-                            } else {
-                              _selectedForCancel.remove(id);
-                            }
-                          });
-                        },
                       ),
                     ),
                   ], //Child of Row
@@ -1240,43 +1707,73 @@ final listDone = listDoneAll.where((e) {
         style: TextStyle(color: Colors.white38, fontSize: 11),
       );
     }
-    return Column(
-      children: _editSearchResults.map((eval) {
-        final agent = _agentDeEvaluation(eval);
-        final rawDate = eval['date_evaluation'] as String?;
-        final vacation = (eval['vacation'] as String?) ?? '';
-        final score = (eval['score'] ?? 0.0) as num;
+    // Hauteur bornée + barre de défilement dédiée (ScrollController propre,
+    // pour éviter tout conflit de PrimaryScrollController) : évite tout
+    // débordement quand la recherche renvoie beaucoup de résultats.
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: 300),
+      child: Scrollbar(
+        controller: _searchResultsScrollCtrl,
+        thumbVisibility: true,
+        child: ListView.builder(
+          controller: _searchResultsScrollCtrl,
+          shrinkWrap: true,
+          padding: const EdgeInsets.only(right: 4),
+          itemCount: _editSearchResults.length,
+          itemBuilder: (context, index) {
+              final eval = _editSearchResults[index];
+              final agent = _agentDeEvaluation(eval);
+              final rawDate = eval['date_evaluation'] as String?;
+              final vacation = (eval['vacation'] as String?) ?? '';
+              // NOTE : le score n'est volontairement PAS affiché ici — les
+              // superviseurs évaluent mais ne doivent pas connaître la note
+              // (réservée aux reps/DEX dans le classement).
 
-        return Container(
-          margin: const EdgeInsets.only(bottom: 6),
-          child: ListTile(
-            dense: true,
-            tileColor: const Color(0xFF16122D),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-            title: Text(
-              "${agent['nom'] ?? ''} ${agent['prenom'] ?? ''}",
-              style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
-            ),
-            subtitle: Text(
-              "${rawDate ?? '—'} · ${vacation.isEmpty ? 'vacation non renseignée' : vacation} · "
-              "évaluateur : ${eval['evaluateur'] ?? '—'}",
-              style: const TextStyle(color: Colors.white38, fontSize: 10),
-            ),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  "${score.toStringAsFixed(1)} pts",
-                  style: const TextStyle(color: Colors.purpleAccent, fontWeight: FontWeight.bold, fontSize: 12),
+              return Container(
+                margin: const EdgeInsets.only(bottom: 6),
+                child: ListTile(
+                  dense: true,
+                  tileColor: const Color(0xFF16122D),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  title: Text(
+                    "${agent['nom'] ?? ''} ${agent['prenom'] ?? ''}",
+                    style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
+                  ),
+                  subtitle: Text(
+                    "${rawDate ?? '—'} · ${vacation.isEmpty ? 'vacation non renseignée' : vacation} · "
+                    "évaluateur : ${eval['evaluateur'] ?? '—'}",
+                    style: const TextStyle(color: Colors.white38, fontSize: 10),
+                  ),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        onPressed: () => _onTapResultatModification(eval),
+                        icon: const Icon(Icons.edit_outlined, size: 16, color: Colors.white54),
+                        tooltip: "Amender",
+                        constraints: const BoxConstraints(),
+                        padding: const EdgeInsets.all(6),
+                      ),
+                      IconButton(
+                        onPressed: () => _onTapSupprimerResultat(eval),
+                        icon: const Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
+                        tooltip: "Supprimer",
+                        constraints: const BoxConstraints(),
+                        padding: const EdgeInsets.all(6),
+                      ),
+                    ],
+                  ),
+                  // Pas de onTap sur la tuile elle-même : seules les deux
+                  // icônes (Amender / Supprimer) sont interactives. Avoir un
+                  // onTap sur toute la ligne EN PLUS des IconButton dans
+                  // `trailing` créait une ambiguïté de hit-test (double
+                  // déclenchement possible au clic) qui provoquait un blocage
+                  // de l'interface après une recherche.
                 ),
-                const SizedBox(width: 8),
-                const Icon(Icons.edit_outlined, size: 15, color: Colors.white38),
-              ],
-            ),
-            onTap: () => _onTapResultatModification(eval),
-          ),
-        );
-      }).toList(),
+              );
+          },
+        ),
+      ),
     );
   }
 
@@ -1288,7 +1785,6 @@ final listDone = listDoneAll.where((e) {
     bool isDone = false,
     Set<String>? selectedIds,
     required Function(Map<String, dynamic>) onTap,
-    Function(String, bool)? onSelectionChanged,
   }) {
     return Column(
       children: [
@@ -1310,22 +1806,68 @@ final listDone = listDoneAll.where((e) {
             ),
           ),
         ),
-        if (isDone && _selectedForCancel.length >= 2) ...[
+        if (isDone && _selectedForCancel.isNotEmpty) ...[
           Container(
             width: double.infinity,
             margin: const EdgeInsets.only(bottom: 8),
-            child: ElevatedButton.icon(
-              onPressed: _cancelMultipleEvaluations,
-              icon: const Icon(Icons.undo, color: Colors.white),
-              label: Text(
-                "Annuler Evaluation (${_selectedForCancel.length})",
-                style: const TextStyle(color: Colors.white),
-              ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.redAccent,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-              ),
-            ),
+            child: _selectedForCancel.length == 1
+                ? Row(children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: () {
+                          final matches = list.where((e) => e['id'] == _selectedForCancel.first);
+                          if (matches.isNotEmpty) _editSessionEvaluation(matches.first);
+                        },
+                        icon: const Icon(Icons.edit_outlined, color: Colors.white, size: 15),
+                        label: const Text("Modifier", style: TextStyle(color: Colors.white, fontSize: 12)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.purpleAccent.withOpacity(0.9),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: () {
+                          final matches = list.where((e) => e['id'] == _selectedForCancel.first);
+                          if (matches.isNotEmpty) _showCancelDialog(matches.first);
+                        },
+                        icon: const Icon(Icons.delete_outline, color: Colors.white, size: 15),
+                        label: const Text("Supprimer", style: TextStyle(color: Colors.white, fontSize: 12)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.redAccent,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => setState(() => _selectedForCancel.clear()),
+                      icon: const Icon(Icons.close, color: Colors.white38, size: 18),
+                      tooltip: "Désélectionner",
+                    ),
+                  ])
+                : Row(children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _cancelMultipleEvaluations,
+                        icon: const Icon(Icons.delete_outline, color: Colors.white),
+                        label: Text(
+                          "Supprimer (${_selectedForCancel.length})",
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.redAccent,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => setState(() => _selectedForCancel.clear()),
+                      icon: const Icon(Icons.close, color: Colors.white38, size: 18),
+                      tooltip: "Désélectionner",
+                    ),
+                  ]),
           ),
         ],
         Expanded(
@@ -1348,7 +1890,7 @@ final listDone = listDoneAll.where((e) {
                 return ListTile(
                   enabled: !isExempt,
                   selected: isSelected,
-                  selectedTileColor: Colors.redAccent.withOpacity(0.1),
+                  selectedTileColor: Colors.purpleAccent.withOpacity(0.1),
                   title: Text(
                     "${emp['nom']} ${emp['prenom']}",
                     style: TextStyle(
@@ -1376,7 +1918,7 @@ final listDone = listDoneAll.where((e) {
                               ? Icons.check_circle
                               : (isDone ? Icons.check_circle : Icons.arrow_forward_ios),
                           color: isSelected
-                              ? Colors.redAccent
+                              ? Colors.purpleAccent
                               : (isDone ? Colors.greenAccent : Colors.white24),
                           size: 16,
                         ),
@@ -1385,11 +1927,28 @@ final listDone = listDoneAll.where((e) {
                   onTap: isExempt
                       ? null
                       : () {
-                          if (isDone && _isControlDown) {
-                            final selected = !isSelected;
-                            onSelectionChanged?.call(emp['id'] as String, selected);
+                          if (isDone) {
+                            setState(() {
+                              if (_isControlDown) {
+                                // Ctrl+clic : sélection multiple (pour suppression groupée).
+                                if (isSelected) {
+                                  _selectedForCancel.remove(emp['id']);
+                                } else {
+                                  _selectedForCancel.add(emp['id'] as String);
+                                }
+                              } else if (isSelected && _selectedForCancel.length == 1) {
+                                // Clic simple sur l'agent déjà seul sélectionné → désélectionne.
+                                _selectedForCancel.clear();
+                              } else {
+                                // Clic simple : sélection exclusive d'un seul agent
+                                // (affiche "Modifier" / "Supprimer" pour lui).
+                                _selectedForCancel
+                                  ..clear()
+                                  ..add(emp['id'] as String);
+                              }
+                            });
                           } else {
-                            if (_selectedForCancel.isNotEmpty && !_isControlDown) {
+                            if (_selectedForCancel.isNotEmpty) {
                               setState(() => _selectedForCancel.clear());
                             }
                             onTap(emp);
