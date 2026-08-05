@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'employee_repository.dart';
 
@@ -312,8 +313,3 @@ class AuthManager {
     }
   }
 }
-
-/// Petit helper pour lancer un Future sans attendre son résultat, sans
-/// avertissement de l'analyseur Dart (équivalent à `dart:async`'s
-/// `unawaited`, réécrit ici pour ne pas ajouter de dépendance).
-void unawaited(Future<void> future) {}

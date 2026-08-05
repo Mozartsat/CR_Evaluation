@@ -95,12 +95,14 @@ class _DirectorDashboardViewState extends State<DirectorDashboardView> {
 }
 
   /// Regroupe les évaluations d'un agent par mois (clé "AAAA-MM") et
-  /// additionne les notes de chaque mois.
+  /// additionne les notes de chaque mois. Basé sur `date_evaluation` (la
+  /// date choisie par le sup, potentiellement rétrogradée/antidatée) et non
+  /// `created_at`, pour qu'une évaluation rétrogradée compte sur le bon mois.
   Map<String, double> _scoresByMonth(Map<String, dynamic> agent) {
     final evals = agent['evaluations'] as List? ?? [];
     final Map<String, double> totals = {};
     for (final e in evals) {
-      final rawDate = e['created_at']?.toString() ?? '';
+      final rawDate = e['date_evaluation']?.toString() ?? '';
       if (rawDate.isEmpty) continue;
       final date = DateTime.tryParse(rawDate);
       if (date == null) continue;
@@ -328,7 +330,7 @@ class _DirectorDashboardViewState extends State<DirectorDashboardView> {
         final displayedEvals = selectedMonthKey == null
             ? evals
             : evals.where((e) {
-                final rawDate = e['created_at']?.toString() ?? '';
+                final rawDate = e['date_evaluation']?.toString() ?? '';
                 final date = DateTime.tryParse(rawDate);
                 if (date == null) return false;
                 final key = '${date.year}-${date.month.toString().padLeft(2, '0')}';
@@ -989,7 +991,7 @@ Widget _buildDetailRow(String categorie, List items) {
 
       final evals = agent['evaluations'] as List? ?? [];
       for (final e in evals) {
-        final rawDate = e['created_at']?.toString() ?? '';
+        final rawDate = e['date_evaluation']?.toString() ?? '';
         final date = DateTime.tryParse(rawDate);
         if (date != null && date.year == now.year && date.month == now.month) {
           evalsThisMonth++;

@@ -7,6 +7,7 @@ import 'scores_view.dart';
 import 'director_view.dart'; // DirectorDashboardView
 import 'journal_view.dart'; // ← Journal d'activité (admin)
 import 'comptes_view.dart'; // ← Gestion des comptes (admin)
+import 'suivi_evaluations_view.dart'; // ← Suivi des Évaluations (calendrier)
 import 'change_password_dialog.dart'; // ← Changer son propre mot de passe
 import 'evaluation_unlock_view.dart'; // ← AJOUTER : déblocage évaluations (Rep/Admin)
 import 'package:supabase_flutter/supabase_flutter.dart'; // N'oubliez pas cet import
@@ -102,6 +103,10 @@ class _MainDashboardState extends State<MainDashboard> {
 
     if (_selectedPage == "Gestion des comptes") {
       return const ComptesView();
+    }
+
+    if (_selectedPage == "Suivi des Évaluations") {
+      return const SuiviEvaluationsView();
     }
 
     final List<String> parts = _selectedPage.split(' : ');
@@ -213,6 +218,16 @@ class _MainDashboardState extends State<MainDashboard> {
                         const Divider(color: Colors.white10),
                         _buildGoldSectionTitle('SUPERVISEUR'),
                         _buildCityTree("Évaluation du personnel"),
+                      ],
+                      // Visible pour rep/sup/admin : positionné ici, après
+                      // le bloc RESPONSABLE (Scores) ET après le bloc
+                      // SUPERVISEUR (Évaluation du personnel), pour être
+                      // accessible aux deux profils.
+                      if (AuthManager.currentUserRole == "rep" ||
+                          AuthManager.currentUserRole == "sup" ||
+                          AuthManager.currentUserRole == "admin") ...[
+                        const Divider(color: Colors.white10),
+                        _buildNavItem(Icons.calendar_month_outlined, "Suivi des Évaluations"),
                       ],
                       // --- Accès Direction + Journal, réservé à admin ---
                       // Les comptes DEX (director_view.dart) y accèdent par

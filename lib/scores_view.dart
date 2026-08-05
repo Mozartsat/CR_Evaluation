@@ -500,6 +500,10 @@ class _ScoreViewState extends State<ScoreView> {
   }
 
   /// Liste des évaluations d'un agent qui tombent dans le mois/année donné.
+  /// Basé sur `date_evaluation` (la date choisie par le sup — potentiellement
+  /// antidatée/rétrogradée) et NON `created_at` (l'horodatage réel
+  /// d'enregistrement), pour qu'une évaluation rétrogradée soit bien
+  /// comptabilisée sur le mois qu'elle concerne réellement.
   List<dynamic> _evaluationsForMonth(
     Map<String, dynamic> emp,
     int month,
@@ -508,7 +512,7 @@ class _ScoreViewState extends State<ScoreView> {
     final evaluations = emp['evaluations'] as List? ?? [];
     if (evaluations.isEmpty) return const [];
     return evaluations.where((eval) {
-      final rawDate = eval['created_at'] as String? ?? '';
+      final rawDate = eval['date_evaluation'] as String? ?? '';
       if (rawDate.isEmpty) return false;
       final evalDate = DateTime.tryParse(rawDate);
       if (evalDate == null) return false;
@@ -1218,9 +1222,10 @@ Expanded(
                       ),
                     ],
                     rows: evaluations.map((eval) {
-                      print('EVAL COMPLET: $eval'); // ← AJOUTER ICI temporairement
-         // ↓ AJOUTER CES LIGNES ICI (juste avant le return DataRow)
-  final rawDate = eval['created_at'] ?? '';
+         // Date affichée = date_evaluation (celle choisie par le sup,
+         // potentiellement antidatée/rétrogradée), pas created_at (horodatage
+         // réel d'enregistrement en base).
+  final rawDate = eval['date_evaluation'] ?? '';
   final parts = rawDate.isNotEmpty ? rawDate.substring(0, 10).split('-') : [];
   final formattedDate = parts.length == 3
       ? '${parts[2]}/${parts[1]}/${parts[0]}'

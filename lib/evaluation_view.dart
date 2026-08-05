@@ -9,8 +9,6 @@ class _SessionFieldsConfig {
   final IconData icon1;
   final List<String> posteOptions;
   final bool showNumeroVol;
-  
-
   const _SessionFieldsConfig({
     required this.label1,
     required this.icon1,
@@ -106,7 +104,7 @@ class _EvaluationViewState extends State<EvaluationView> {
         showNumeroVol: false,
       );
     }
-    if (s.contains('garage')) {
+    if (s.contains('grg')) {
       // supgrgpnr
       return const _SessionFieldsConfig(
         label1: "Agents",
@@ -160,9 +158,11 @@ class _EvaluationViewState extends State<EvaluationView> {
 
   bool get _sessionReady {
     final cfg = _fieldsConfig;
+    // _sessionEntries peut être vide : si le sup retire toutes les lignes
+    // GDV/poste/vol faute d'info à renseigner, la session reste utilisable
+    // avec juste vacation + évaluateur (every() sur liste vide vaut true).
     final base = _vacationController.text.trim().isNotEmpty &&
         _evaluateurController.text.trim().isNotEmpty &&
-        _sessionEntries.isNotEmpty &&
         _sessionEntries.every((e) =>
             e.identifiantCtrl.text.trim().isNotEmpty &&
             e.poste != null &&
@@ -431,16 +431,14 @@ class _EvaluationViewState extends State<EvaluationView> {
               ),
             ),
           ],
-          if (_sessionEntries.length > 1) ...[
-            const SizedBox(width: 4),
-            IconButton(
-              onPressed: () => _retirerSessionEntry(index),
-              icon: const Icon(Icons.remove_circle_outline, size: 18, color: Colors.redAccent),
-              tooltip: "Retirer cette ligne",
-              constraints: const BoxConstraints(),
-              padding: const EdgeInsets.all(6),
-            ),
-          ],
+          const SizedBox(width: 4),
+          IconButton(
+            onPressed: () => _retirerSessionEntry(index),
+            icon: const Icon(Icons.remove_circle_outline, size: 18, color: Colors.redAccent),
+            tooltip: "Retirer cette ligne (rien à renseigner ici)",
+            constraints: const BoxConstraints(),
+            padding: const EdgeInsets.all(6),
+          ),
         ],
       ),
     );
